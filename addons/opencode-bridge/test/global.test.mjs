@@ -131,13 +131,13 @@ if (command.length === 1) {
     const root = path.resolve(path.dirname(command[0]), '..');
     const pkg = await readFile(path.join(root, 'package.json'), 'utf8').then(JSON.parse, () => undefined);
     if (pkg?.name === 'opencode-ai') {
-      const shimPackage = path.join(bin, 'node_modules', 'opencode-ai');
+      const shimPackage = path.join(bin, 'node_modules', '@opencode', 'opencode-ai');
       await mkdir(shimPackage, { recursive: true });
       await symlink(path.dirname(command[0]), path.join(shimPackage, 'bin'), 'junction');
       // PowerShell-created global manifests may contain a UTF-8 BOM. Follow the
       // package's declared bin without requiring a filename or runtime version.
-      await writeFile(path.join(shimPackage, 'package.json'), '\ufeff' + JSON.stringify({ name: 'opencode-ai', version: 'unlisted', bin: { opencode: './bin/' + path.basename(command[0]) } }));
-      await writeFile(path.join(bin, 'opencode.cmd'), '@echo off\r\n"%~dp0node_modules\\opencode-ai\\bin\\opencode.exe" %*\r\n');
+      await writeFile(path.join(shimPackage, 'package.json'), '\ufeff' + JSON.stringify({ name: '@opencode/opencode-ai', version: 'unlisted', bin: { opencode: './bin/' + path.basename(command[0]) } }));
+      await writeFile(path.join(bin, 'opencode.cmd'), '@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n"%dp0%\\node_modules\\@opencode\\opencode-ai\\bin\\' + path.basename(command[0]) + '"   %*\r\n');
       fixtureCommand = undefined;
     } else {
       await symlink(command[0], path.join(bin, 'opencode.exe'));

@@ -13,14 +13,27 @@ export const OpenCodeBridgePlugin = async (_, options = {}) => {
   const config = normalizeConfig(JSON.parse(content.replace(/^\uFEFF/, '')), path.dirname(path.resolve(file)));
   const bridge = new OpenCodeBridge(config);
   const id = 'opencode-bridge';
+  const api = 'http://opencode-bridge.local/v1';
+  const definitions = models => Object.fromEntries(Object.entries(models).map(([name, model]) => [name, { name: model.name ?? name, limit: { context: model.context, output: model.output }, modalities: { input: ['text'], output: ['text'] } }]));
   return {
     config: async (cfg) => {
-      const models = await bridge.loadModels();
       cfg.provider ??= {};
       cfg.provider[id] = {
-        name: 'OpenCode bridge', npm: '@ai-sdk/openai-compatible', api: 'http://opencode-bridge.local/v1',
-        models: Object.fromEntries(Object.entries(models).map(([name, model]) => [name, { name: model.name ?? name, limit: { context: model.context, output: model.output }, modalities: { input: ['text'], output: ['text'] } }])),
+        name: 'OpenCode bridge', npm: '@ai-sdk/openai-compatible', api,
+        models: definitions(config.models),
       };
+      // Register the transport before discovery. A startup failure must remain
+      // a catalog/startup error instead of becoming a missing gateway endpoint.
+      cfg.provider[id].models = definitions(await bridge.loadModels());
+    },
+    provider: {
+      id,
+      models: async provider => Object.fromEntries(Object.entries(await bridge.loadModels()).map(([name, model]) => [name, {
+        ...(provider.models?.[name] ?? {}), id: name, providerID: id, name: model.name ?? name,
+        api: { id: name, url: api, npm: '@ai-sdk/openai-compatible' },
+        limit: { context: model.context, output: model.output },
+        capabilities: { temperature: true, toolcall: true, input: { text: true }, output: { text: true } },
+      }])),
     },
     auth: {
       provider: id,
@@ -31,7 +44,7 @@ export const OpenCodeBridgePlugin = async (_, options = {}) => {
         }) }]
         : [{ type: 'api', label: 'Upstream API key (or placeholder when apiKeyEnv is configured)' }],
       loader: async (getAuth) => ({
-        apiKey: 'opencode-bridge', baseURL: 'http://opencode-bridge.local/v1',
+        apiKey: 'opencode-bridge', baseURL: api,
         fetch: async (url, init) => {
           const auth = await getAuth();
           return bridge.fetch(url, init, auth?.type === 'api' ? auth.key : undefined);

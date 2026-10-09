@@ -2,9 +2,10 @@ import http from 'node:http';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { mkdtemp, mkdir, writeFile, rm, cp, readFile, access } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, cp, readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { randomUUID, randomBytes } from 'node:crypto';
+import { executableCommand } from './command.mjs';
 import { ApiError, validateRequest, toolName, nativeToolName, usageOf, sseEvents } from './protocol.mjs';
 
 const SDK = { 'openai-chat': '@ai-sdk/openai-compatible', 'openai-responses': '@ai-sdk/openai', anthropic: '@ai-sdk/anthropic' };
@@ -44,33 +45,6 @@ export function normalizeConfig(input, directory = process.cwd()) {
   if (!Number.isSafeInteger(config.maxConcurrent) || config.maxConcurrent < 0) throw new ApiError('maxConcurrent must be a nonnegative integer; 0 means unlimited.', 500);
   for (const key of ['timeoutMs', 'startupTimeoutMs']) if (!Number.isInteger(config[key]) || config[key] <= 0) throw new ApiError(`${key} must be a positive integer.`, 500);
   return config;
-}
-
-async function executableCommand(command) {
-  if (process.platform !== 'win32') return command;
-  // Node cannot spawn a .cmd/.ps1 shim without a shell. Follow the official npm
-  // package's bin entry instead, preserving PATH selection without shell quoting.
-  let selected = command[0];
-  if (!selected.includes('/') && !selected.includes('\\')) {
-    for (const dir of (process.env.PATH ?? process.env.Path ?? '').split(path.delimiter)) {
-      if (!dir) continue;
-      const candidates = path.extname(selected) ? [selected] : [selected + '.exe', selected + '.com', selected + '.cmd', selected + '.bat', selected];
-      const found = await Promise.all(candidates.map(async name => {
-        const file = path.join(dir.replace(/^"|"$/g, ''), name);
-        return await access(file).then(() => file, () => undefined);
-      }));
-      if (found.some(Boolean)) { selected = found.find(Boolean); break; }
-    }
-  }
-  if (/\.(cmd|bat|ps1)$/i.test(selected)) {
-    for (const root of [path.join(path.dirname(selected), 'node_modules', 'opencode-ai'), path.resolve(path.dirname(selected), '..', 'opencode-ai')]) {
-      const pkg = await readFile(path.join(root, 'package.json'), 'utf8').then(text => JSON.parse(text.replace(/^\uFEFF/, '')), () => undefined);
-      const bin = typeof pkg?.bin === 'string' ? pkg.bin : pkg?.bin?.opencode;
-      if (pkg?.name === 'opencode-ai' && typeof bin === 'string') return [path.resolve(root, bin), ...command.slice(1)];
-    }
-    throw new ApiError('Cannot resolve this Windows OpenCode shim. Set command to the actual OpenCode executable or a node/script array.', 503, null, 'opencode_unavailable');
-  }
-  return [selected, ...command.slice(1)];
 }
 
 function sandboxEnv(home) {
@@ -221,7 +195,7 @@ function mcpServer(body, token) {
       let result;
       switch (rpc.method) {
         case 'initialize':
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.7.0' } };
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.8.0' } };
           break;
         case 'ping': result = {}; break;
         case 'tools/list':

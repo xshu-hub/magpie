@@ -1,6 +1,6 @@
 # Magpie OpenCode bridge
 
-0.7.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号和并发请求数**。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
+0.8.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号和并发请求数**。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
 
 请求方向：客户端 → Magpie → 插件 → 全局 OpenCode → 它配置的上游。也可运行独立的 OpenAI Chat HTTP 服务。
 
@@ -24,7 +24,7 @@ opencode models
 也可在解压目录用 CLI 安装：
 
 ```powershell
-tar -xzf xshu-hub-magpie-opencode-bridge-0.7.0.tgz
+tar -xzf xshu-hub-magpie-opencode-bridge-0.8.0.tgz
 .\magpie-cli-windows-amd64.exe plugin add .\package
 .\magpie-cli-windows-amd64.exe plugin login opencode-bridge
 .\magpie-cli-windows-amd64.exe serve
@@ -44,7 +44,9 @@ tar -xzf xshu-hub-magpie-opencode-bridge-0.7.0.tgz
 }
 ```
 
-`command` 使用 PATH 上的全局程序。Windows 官方 npm `.cmd` 包装器会解析为同一安装包声明的原生 bin，不通过 shell 拼接执行；自定义包装器需要明确填写可执行文件路径，或 `["node", "脚本绝对路径"]`。GUI 需要重新打开才能继承刚更新的 PATH。
+`command` 使用 PATH 上的全局程序。0.8.0 跟随选中 Windows `.cmd` / `.ps1` 启动脚本中的实际安装路径，支持 `opencode-ai` 和 `@opencode/opencode-ai` 等 scoped 布局，并保留旧 npm manifest 与重命名 bin 的解析。原生 EXE 直接启动，Node 脚本使用对应安装位置或 PATH 中的 Node；解析过程不执行包装器内容，也不按 OpenCode 版本号选择程序。存在旧安装时，优先使用所选脚本真正指向的程序。动态或无法识别的自定义包装器需要明确填写可执行文件路径，或 `["node", "脚本绝对路径"]`。GUI 需要重新打开才能继承刚更新的 PATH。
+
+模型发现前先注册本地插件 endpoint。OpenCode 启动失败时，模型 hook 报出真实发现错误，Magpie 可按自己的缓存规则保留之前列表；请求会返回该启动错误，不会再因 config hook 中断而变成 `opencode-bridge has no endpoint configured`。此类错误发生在读取 OpenCode 模型目录之前，不能通过重填上游供应商地址解决。旧版需要临时绕过包装器时，可在可选 `config.json` 中把 `command` 设置为那台机器上的真实 OpenCode EXE 绝对路径，并保持 `mode: "global"`。
 
 运行 Magpie 的用户和环境须与全局 OpenCode 一致，才能继承 HOME、XDG 路径、环境变量和登录插件。作为另一用户的服务或在容器中运行，不会自动获得桌面用户的登录。
 

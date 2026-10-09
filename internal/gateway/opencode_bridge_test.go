@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -29,6 +30,7 @@ func TestOpenCodeV1Bridge(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) { testOpenCodeV1Bridge(t, global) })
 	}
+	t.Run("missing_program", testOpenCodeBridgeStartupError)
 }
 
 func testOpenCodeV1Bridge(t *testing.T, global bool) {
@@ -99,6 +101,19 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 	}
 	addon, _ := filepath.Abs("../../addons/opencode-bridge")
 	if global {
+		if runtime.GOOS == "windows" && len(cmd) == 1 {
+			bin := t.TempDir()
+			root := filepath.Join(bin, "node_modules", "@opencode", "opencode-ai")
+			if err := os.CopyFS(filepath.Join(root, "bin"), os.DirFS(filepath.Dir(cmd[0]))); err != nil {
+				t.Fatal(err)
+			}
+			shim := "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\"%dp0%\\node_modules\\@opencode\\opencode-ai\\bin\\" + filepath.Base(cmd[0]) + "\"   %*\r\n"
+			if err := os.WriteFile(filepath.Join(bin, "opencode.cmd"), []byte(shim), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			config["command"] = []string{"opencode"}
+		}
 		t.Setenv("XDG_DATA_HOME", t.TempDir())
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		for _, key := range []string{"OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "OPENCODE_AUTH_CONTENT"} {
@@ -291,5 +306,68 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 	}
 	if calls.Load() != 8 || concurrentCalls.Load() != 4 {
 		t.Errorf("eight client requests caused %d upstream inferences, %d concurrent", calls.Load(), concurrentCalls.Load())
+	}
+}
+
+func testOpenCodeBridgeStartupError(t *testing.T) {
+	if os.Getenv("TEST_OPENCODE_COMMAND") == "" {
+		t.Skip("set TEST_OPENCODE_COMMAND to run the real bridge host check")
+	}
+	bun, err := exec.LookPath("bun")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh(t)
+	t.Setenv("MAGPIE_BUN", bun)
+	t.Cleanup(plugin.Settle)
+	config := map[string]any{"mode": "global", "command": []string{filepath.Join(t.TempDir(), "missing-opencode.exe")}, "startupTimeoutMs": 500}
+	b, _ := json.Marshal(config)
+	file := filepath.Join(t.TempDir(), "bridge.json")
+	if err := os.WriteFile(file, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MAGPIE_OPENCODE_CONFIG", file)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	plugin.UseCached([]plugin.Provider{})
+	t.Cleanup(func() { plugin.UseCached(nil) })
+	addon, _ := filepath.Abs("../../addons/opencode-bridge")
+	if _, err := plugin.Add(ctx, addon); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Providers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, err := provider.StartPluginSignIn("opencode-bridge", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		status, ok := provider.SignInStatus(st.ID)
+		if !ok || status.State == "failed" || status.State == "canceled" {
+			t.Fatalf("bridge activation: %+v", status)
+		}
+		if status.State == "done" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	gw := httptest.NewServer(lanGuard(New().Handler()))
+	defer gw.Close()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, gw.URL+"/v1/chat/completions", strings.NewReader(`{"model":"opencode-bridge/oc-default","messages":[{"role":"user","content":"Hello"}]}`))
+	req.Header.Set("Authorization", "Bearer fixture-client")
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	reply, _ := io.ReadAll(res.Body)
+	if res.StatusCode != 503 || !strings.Contains(string(reply), "OpenCode") || strings.Contains(string(reply), "no endpoint configured") {
+		t.Fatalf("gateway must expose the OpenCode startup failure: HTTP %d %s", res.StatusCode, reply)
 	}
 }

@@ -98,6 +98,13 @@ It reads the real OpenCode provider catalog to expose
 connected text models. With no addon
 config file, it selects global mode and the PATH executable automatically;
 explicit aliases remain supported and credential fields are never copied.
+Windows launcher resolution follows the selected CMD/PowerShell wrapper's static
+package target, including scoped installs, before trying older manifest-only
+layouts. JavaScript launchers use Node; native executables are started directly.
+The bridge registers its local provider transport before catalog discovery.
+Failed discovery is raised by the models hook; Magpie may retain its previous
+list under its existing cache policy. Requests report the underlying OpenCode
+startup failure instead of a missing gateway endpoint.
 The GUI initializes a local plugin's host even on a cold Bun cache, so sign-in
 methods are displayed instead of silently reporting that the plugin has none.
 MCP acknowledges client-tool deferral, allowing a complete
