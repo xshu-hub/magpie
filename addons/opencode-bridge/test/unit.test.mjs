@@ -44,6 +44,26 @@ test('preserve role history and associate reversed parallel tool results by id',
 test('cache and reasoning tokens map to OpenAI totals', () => {
   assert.deepEqual(usageOf({ input: 10, output: 3, reasoning: 2, cache: { read: 7, write: 5 } }), { prompt_tokens: 22, completion_tokens: 5, total_tokens: 27, prompt_tokens_details: { cached_tokens: 7 }, completion_tokens_details: { reasoning_tokens: 2 } });
 });
+test('Cherry Studio assistant reasoning_content is valid history, with reasoning kept separate from visible text', () => {
+  for (const reasoning of ['', null, 'PRIOR_REASONING_SENTINEL']) {
+    const body = { model: 'test', messages: [
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Previous answer', reasoning_content: reasoning },
+      { role: 'user', content: 'Continue' },
+    ] };
+    assert.equal(validateRequest(body, models), body);
+    const history = toNativeHistory(body, 'ses_test', 'mock', '/sandbox');
+    const parts = history.messages[1].parts;
+    assert.deepEqual(parts.filter(p => p.type === 'text').map(p => p.text), ['Previous answer']);
+    assert.deepEqual(parts.filter(p => p.type === 'reasoning').map(p => p.text), reasoning ? [reasoning] : []);
+  }
+  for (const reasoning_content of [0, [], {}]) {
+    const body = { model: 'test', messages: [{ role: 'assistant', content: 'Answer', reasoning_content }, { role: 'user', content: 'Continue' }] };
+    assert.throws(() => validateRequest(body, models), error => error.status === 400 && error.param === 'messages[0].reasoning_content');
+  }
+  assert.throws(() => validateRequest({ ...base(), messages: [{ role: 'user', content: 'Hello', reasoning_content: '' }] }, models), error => error.status === 400 && error.param === 'messages[0].reasoning_content');
+  assert.throws(() => validateRequest({ ...base(), messages: [{ role: 'user', content: 'Hello', unexpected_extension: '' }] }, models), error => error.status === 400 && error.param === 'messages[0].unexpected_extension' && error.message.includes('unexpected_extension'));
+});
 test('SSE survives every UTF-8/CRLF split and rejects incomplete tails', async () => {
   const bytes = Buffer.from('data: {"text":"你好"}\r\n\r\ndata: {"text":"ok"}\n\n');
   async function* input() { for (const b of bytes) yield Buffer.from([b]); }

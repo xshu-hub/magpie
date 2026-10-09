@@ -215,6 +215,26 @@ test('explicit model selection still uses the global saved key and ignores a Mag
   assert.equal(refreshes, 1, 'Refreshed credentials survive a new worker');
 });
 
+test('Cherry Studio multi-turn history with empty, null or nonempty reasoning goes through real global OpenCode', { timeout: 120000 }, async () => {
+  for (const reasoning_content of ['', null, 'GLOBAL_PRIOR_REASONING_SENTINEL']) {
+    const before = requests.length;
+    const response = await request({ messages: [
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Previous answer', reasoning_content },
+      { role: 'user', content: 'Continue' },
+    ] });
+    const result = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(result));
+    assert.equal(result.choices[0].message.content, '复用全局 OpenCode 登录。');
+    assert.equal(requests.length, before + 1);
+    const sent = requests.at(-1).body.messages;
+    assert.deepEqual(sent.map(m => m.role), ['user', 'assistant', 'user']);
+    assert.equal(sent[1].content, 'Previous answer');
+    assert.equal(sent[1].reasoning_content || '', reasoning_content || '');
+    assert.equal(sent[2].content, 'Continue');
+  }
+});
+
 test('global model discovery lists connected providers and calls the selected model without copying credentials', { timeout: 60000 }, async () => {
   const discovered = new OpenCodeBridge({ ...options, discoverModels: true });
   const before = requests.length;

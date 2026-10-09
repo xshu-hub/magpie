@@ -60,7 +60,8 @@ export function validateRequest(body, models) {
   for (const [i, m] of body.messages.entries()) {
     const param = `messages[${i}]`;
     if (!object(m) || !['system', 'developer', 'user', 'assistant', 'tool'].includes(m.role)) fail('Unsupported message role.', param);
-    if (Object.keys(m).some(k => !['role', 'content', 'tool_calls', 'tool_call_id'].includes(k))) fail('Unsupported message field.', param);
+    for (const key of Object.keys(m)) if (!['role', 'content', 'tool_calls', 'tool_call_id', 'reasoning_content'].includes(key)) fail(`Unsupported message field: ${key}.`, `${param}.${key}`);
+    if (m.reasoning_content !== undefined && (m.role !== 'assistant' || (m.reasoning_content !== null && typeof m.reasoning_content !== 'string'))) fail('reasoning_content must be text or null on an assistant message.', `${param}.reasoning_content`);
     textContent(m.content, `${param}.content`, m.role === 'assistant');
     if (m.role === 'system' || m.role === 'developer') {
       if (seenConversation) fail('System/developer messages must precede conversation messages.', param);
@@ -112,6 +113,7 @@ export function toNativeHistory(body, sessionID, modelID, directory, providerID 
       ? { ...base, model: { providerID, modelID } }
       : { ...base, parentID, modelID, providerID, mode: 'bridge', path: { cwd: directory, root: directory }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } };
     const parts = [];
+    if (m.reasoning_content) parts.push(part(id, { type: 'reasoning', text: m.reasoning_content, time: { start: 0, end: 0 } }));
     const content = textContent(m.content, 'content', m.role === 'assistant');
     if (content) parts.push(part(id, { type: 'text', text: content }));
     for (const call of m.tool_calls ?? []) {

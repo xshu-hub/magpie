@@ -73,10 +73,10 @@ jobs:
           mkdir -p artifacts
           if [ "$RUNNER_OS" = Windows ]; then
             go vet ./...
-            go build -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.5.0' -o artifacts/magpie-windows-amd64.exe .
-            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.5.0' -o artifacts/magpie-cli-windows-amd64.exe .
+            go build -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.6.0' -o artifacts/magpie-windows-amd64.exe .
+            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.6.0' -o artifacts/magpie-cli-windows-amd64.exe .
           else
-            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.5.0' -o artifacts/magpie-cli-linux-amd64 .
+            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.6.0' -o artifacts/magpie-cli-linux-amd64 .
           fi
       - name: Sandbox full terminal Go suite
         if: runner.os == 'Linux' && matrix.opencode == '1.18.35'

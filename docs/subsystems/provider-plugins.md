@@ -110,6 +110,10 @@ reported in the version header when available. CI exercises official 1.16.2 and
 1.18.35 on Windows and Linux; other runtimes are attempted by their capabilities.
 `TestOpenCodeV1Bridge` in `internal/gateway/opencode_bridge_test.go` is an opt-in
 real gateway/host/binary check; the addon has Node protocol and real OpenCode tests.
+Assistant history accepts string or null `reasoning_content`, including the
+empty field emitted by Cherry Studio 2.0.14. Nonempty reasoning becomes a
+separate native OpenCode reasoning part, with provider SDKs owning its upstream
+representation. Unknown message fields report their name and exact path.
 The addon README records the supported API subset and experimental-hook constraints.
 
 [`migrate_notice_test.go`](../../internal/provider/migrate_notice_test.go) includes `TestMovedBuiltinsSayTheirPlugin`, which checks that moved built-ins tell contributors which plugin serves them. Migration tests live beside [`migrate.go`](../../internal/provider/migrate.go).

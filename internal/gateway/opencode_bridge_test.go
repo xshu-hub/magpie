@@ -221,7 +221,7 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 		return res.StatusCode, string(reply)
 	}
 	for _, stream := range []bool{false, true} {
-		code, body := ask(fmt.Sprintf(`{"model":"opencode-bridge/oc-mock","messages":[{"role":"user","content":"gateway sentinel"}],"stream":%t}`, stream))
+		code, body := ask(fmt.Sprintf(`{"model":"opencode-bridge/oc-mock","messages":[{"role":"user","content":"Hello"},{"role":"assistant","content":"Previous answer","reasoning_content":""},{"role":"user","content":"gateway sentinel"}],"stream":%t}`, stream))
 		if code != 200 || !strings.Contains(body, "Through real OpenCode v1") {
 			t.Fatalf("real gateway stream=%t: HTTP %d %s", stream, code, body)
 		}

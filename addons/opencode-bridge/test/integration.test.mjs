@@ -46,7 +46,7 @@ const request = (body, signal) => bridge.fetch('http://bridge/v1/chat/completion
 
 test('real unmodified v1 initiates inference with role history, system and generation parameters', { timeout: 40000 }, async () => {
   const before = requests.length;
-  const response = await request({ messages: [{ role: 'system', content: 'SYSTEM_SENTINEL' }, { role: 'user', content: 'Previous user' }, { role: 'assistant', content: 'Previous assistant' }, { role: 'user', content: 'Say hello' }], temperature: 0.2, top_p: 0.9, max_tokens: 123 });
+  const response = await request({ messages: [{ role: 'system', content: 'SYSTEM_SENTINEL' }, { role: 'user', content: 'Previous user' }, { role: 'assistant', content: 'Previous assistant', reasoning_content: 'PRIOR_REASONING_SENTINEL' }, { role: 'user', content: 'Say hello' }], temperature: 0.2, top_p: 0.9, max_tokens: 123 });
   const result = await response.json();
   assert.equal(response.status, 200, JSON.stringify(result));
   if (process.env.TEST_OPENCODE_VERSION) assert.equal(response.headers.get('x-opencode-version'), process.env.TEST_OPENCODE_VERSION);
@@ -58,6 +58,8 @@ test('real unmodified v1 initiates inference with role history, system and gener
   assert.equal(sent.auth, 'Bearer local-test-key');
   assert.deepEqual(sent.body.messages.map(m => m.role), ['system', 'user', 'assistant', 'user']);
   assert.equal(sent.body.messages[0].content, 'SYSTEM_SENTINEL');
+  assert.equal(sent.body.messages[2].content, 'Previous assistant');
+  assert.equal(sent.body.messages[2].reasoning_content, 'PRIOR_REASONING_SENTINEL');
   assert.equal(sent.body.messages.at(-1).content, 'Say hello');
   assert.equal(sent.body.temperature, 0.2);
   assert.equal(sent.body.top_p, 0.9);
