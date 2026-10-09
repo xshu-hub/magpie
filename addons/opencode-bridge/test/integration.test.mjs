@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { readdir, readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { OpenCodeBridge } from '../lib/bridge.mjs';
 import { nativeToolName, sseEvents } from '../lib/protocol.mjs';
 
@@ -34,6 +36,11 @@ const upstream = http.createServer(async (req, res) => {
 });
 await new Promise(r => upstream.listen(0, '127.0.0.1', r));
 const config = { command: JSON.parse(command), maxConcurrent: 1, timeoutMs: 30000, startupTimeoutMs: 15000, models: { 'oc-mock': { protocol: 'openai-chat', baseURL: `http://127.0.0.1:${upstream.address().port}/v1`, id: 'mock', context: 100000, output: 1000 } } };
+config.onFailure = async ({ phase, home, output }) => {
+  console.log('OpenCode fixture failure stage:', phase, 'output:', output);
+  const dir = path.join(home, 'data', 'opencode', 'log');
+  for (const name of await readdir(dir).catch(() => [])) console.log('OpenCode fixture log:', (await readFile(path.join(dir, name), 'utf8')).slice(-12000));
+};
 const bridge = new OpenCodeBridge(config);
 const request = (body, signal) => bridge.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'oc-mock', ...body }), signal }, 'local-test-key');
 

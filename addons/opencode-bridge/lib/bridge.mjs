@@ -240,6 +240,7 @@ export class OpenCodeBridge {
       await api(`/session/${sessionID}/prompt_async`, { model: { providerID: 'opencode-bridge', modelID }, agent: 'bridge', parts: [{ type: 'text', text: 'Complete the current client request.' }] });
       return { events: events.body, sessionID, cleanup, signal: combined, abort: () => api(`/session/${sessionID}/abort`, {}, AbortSignal.timeout(2000)) };
     } catch (error) {
+      if (typeof this.config.onFailure === 'function') await this.config.onFailure({ phase, home, output: worker?.output ?? version?.output ?? '' }).catch(() => {});
       await cleanup();
       throw combined.aborted ? combined.reason : error;
     }

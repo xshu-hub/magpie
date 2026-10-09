@@ -48,7 +48,7 @@ export function validateRequest(body, models) {
     if (t?.type !== 'function' || !object(f) || typeof f.name !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(f.name) || names.has(f.name)) fail('Tool names must be unique function names (1–64 letters, digits, underscores or hyphens).', 'tools');
     if (Object.keys(t).some(k => !['type', 'function'].includes(k)) || Object.keys(f).some(k => !['name', 'description', 'parameters', 'strict'].includes(k))) fail('Unsupported tool definition field.', 'tools');
     if (f.description !== undefined && typeof f.description !== 'string') fail('Tool description must be text.', 'tools');
-    if (f.strict !== undefined) fail('The bridge cannot guarantee strict schema mode.', 'tools');
+    if (f.strict !== undefined && f.strict !== false) fail('The bridge cannot guarantee strict schema mode.', 'tools');
     const schema = f.parameters ?? { type: 'object', properties: {} };
     if (!object(schema) || schema.type !== 'object' || schema.additionalProperties === true) fail('MCP tools require an object schema without additionalProperties=true.', 'tools');
     names.add(f.name);
