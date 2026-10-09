@@ -1,6 +1,6 @@
 # Magpie OpenCode bridge
 
-0.8.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号和并发请求数**。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
+0.9.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号和并发请求数**。可通过 `workingDirectory` 指定工作目录。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
 
 请求方向：客户端 → Magpie → 插件 → 全局 OpenCode → 它配置的上游。也可运行独立的 OpenAI Chat HTTP 服务。
 
@@ -24,7 +24,7 @@ opencode models
 也可在解压目录用 CLI 安装：
 
 ```powershell
-tar -xzf xshu-hub-magpie-opencode-bridge-0.8.0.tgz
+tar -xzf xshu-hub-magpie-opencode-bridge-0.9.0.tgz
 .\magpie-cli-windows-amd64.exe plugin add .\package
 .\magpie-cli-windows-amd64.exe plugin login opencode-bridge
 .\magpie-cli-windows-amd64.exe serve
@@ -92,13 +92,29 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 
 ## 全局模式的运行方式
 
-每个请求启动同一全局安装中的 OpenCode 程序，工作目录与会话数据库是临时文件。HOME、配置、登录和认证插件保留原路径，所以 token 刷新由 OpenCode 写回真实登录文件，不是复制一份快照再丢弃。桥接代码不解析或发送供应商 token。
+每个请求启动同一全局安装中的 OpenCode 程序。默认工作目录是系统临时目录下的 `magpie-oc-<随机字符>/workspace`；模型发现使用 `magpie-oc-models-<随机字符>/workspace`。请求结束、取消或失败后清理这些临时文件。HOME、配置、登录和认证插件保留原路径，所以 token 刷新由 OpenCode 写回真实登录文件，不是复制一份快照再丢弃。桥接代码不解析或发送供应商 token。
+
+0.9.0 起可在插件 `package` 目录的 `config.json` 中指定已经存在的工作目录：
+
+```json
+{
+  "mode": "global",
+  "workingDirectory": "D:/workspace",
+  "maxConcurrent": 0
+}
+```
+
+已有 `config.json` 时添加 `workingDirectory` 字段即可，保留其他配置。保存后重启 Magpie，或停用再启用插件。Windows 可使用上述正斜杠路径，也可写 `"D:\\workspace"`。相对路径以配置文件所在目录为基准；路径不展开 `%TEMP%`、`$HOME` 或 `~`。未设置时保持临时目录行为。目录必须存在，不能是文件；无效目录返回包含路径的 `503 opencode_working_directory`，不会自动创建或退回临时目录。独立服务和隔离模式也支持该字段。
+
+指定目录同时用于真实 OpenCode 的模型发现与推理进程 cwd。会话数据库、请求文件和 hooks 确认文件仍放在每个请求自己的临时目录，清理不会删除指定目录及其现有文件。所有并发请求共享所选 cwd，但进程、会话数据库、MCP 服务和取消信号各自独立。该设置由网关管理员控制，客户端不能通过 Chat API 选择服务器目录。
+
+指定工作目录不启用项目级 `opencode.json` / `.opencode` 配置读取；桥接仍设置 `OPENCODE_DISABLE_PROJECT_CONFIG=1`，全局模式复用全局供应商配置和登录。它也不打开内置文件、终端或其他本地工具；客户端 function 工具仍由客户端执行。OpenCode 及已加载的全局插件自身可能对目录执行额外操作，这部分行为由它们负责。
 
 两个模式均使用 OpenCode 的标准 AI SDK 运行时，使全局模式中供应商插件的 `auth.loader` 与 `fetch` 保持生效。既有插件会照常执行，OpenCode 本身可能维护配置目录的依赖、缓存、日志或配置格式；桥接不改写供应商配置。
 
 内置工具和其他 MCP 服务在这个 API worker 内禁用。客户端函数以 MCP 形式注册；调用时只返回“交由客户端执行”的内部确认，不执行函数。标准 SDK 完成整批调用后发布 `step-finish`。公开的消息 hook 阻止下一轮模型推理，网关据该事件返回工具调用并取消 worker；该内部确认不会发送给客户端，也不会被用于下一次供应商推理。下一次请求重新注入完整历史和客户端的真实结果。
 
-默认不限制并发，每个请求使用独立的 OpenCode 进程、工作目录、会话数据库、MCP 服务和取消信号。取消一个请求只清理该请求的 worker。`maxConcurrent` 省略或设为 `0` 均表示不限；只有显式设置正整数时才限制活动请求数，满时返回 429。升级已有配置时，把旧的 `maxConcurrent: 1` 删除或改为 `0`。
+默认不限制并发，每个请求使用独立的 OpenCode 进程、会话数据库、MCP 服务和取消信号。未指定工作目录时，cwd 也独立。取消一个请求只清理该请求的 worker。`maxConcurrent` 省略或设为 `0` 均表示不限；只有显式设置正整数时才限制活动请求数，满时返回 429。升级已有配置时，把旧的 `maxConcurrent: 1` 删除或改为 `0`。
 
 全局登录与认证插件仍由各 OpenCode worker 复用；共享登录文件的并发刷新行为由 OpenCode 及供应商认证插件决定。并发验收覆盖已存 API Key 和已刷新的 OAuth 登录，不保证每个第三方插件在同一时刻刷新凭证的行为。
 
@@ -159,4 +175,4 @@ TEST_OPENCODE_COMMAND='["/absolute/path/to/opencode"]' \
   go test -tags nogui -count=1 -timeout 4m ./internal/gateway -run '^TestOpenCodeV1Bridge$'
 ```
 
-测试全部使用临时 HOME 和 loopback fixture，不接触真实登录。并发测试让四个真实 OpenCode worker 的上游请求同时保持活动，验证混合流式/非流式结果隔离、复用登录和独立取消。GitHub workflow 在 Windows/Linux 上分别验证 1.16.2 和 1.18.35，构建两种平台产物；Linux 运行完整 nogui Go suite。测试其他版本时可用 `TEST_OPENCODE_PLUGIN_DIR` 指定测试安装中的真实 SDK 目录，`TEST_OPENCODE_VERSION` 用于核验版本响应头；这些变量没有运行版本白名单。
+测试全部使用临时 HOME 和 loopback fixture，不接触真实登录。并发测试让四个真实 OpenCode worker 在同一个指定 cwd 下的上游请求同时保持活动，验证混合流式/非流式结果隔离、独立数据库、复用登录和独立取消。目录测试覆盖带中文及空格的路径、相对配置路径、模型发现与推理的实际 cwd、错误目录、项目配置仍关闭、默认临时目录清理以及指定目录的现有文件保留。GitHub workflow 在 Windows/Linux 上分别验证 1.16.2 和 1.18.35，构建两种平台产物；Linux 运行完整 nogui Go suite。测试其他版本时可用 `TEST_OPENCODE_PLUGIN_DIR` 指定测试安装中的真实 SDK 目录，`TEST_OPENCODE_VERSION` 用于核验版本响应头；这些变量没有运行版本白名单。

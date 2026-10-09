@@ -2,7 +2,7 @@ import http from 'node:http';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { mkdtemp, mkdir, writeFile, rm, cp, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, cp, readFile, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { executableCommand } from './command.mjs';
@@ -24,6 +24,7 @@ export function normalizeConfig(input, directory = process.cwd()) {
   if (!Array.isArray(configuredCommand) || !configuredCommand.length || configuredCommand.some(x => typeof x !== 'string' || !x)) throw new ApiError('command must be an executable and optional argument array.', 500);
   const command = [...configuredCommand];
   if (command[0].includes('/') || command[0].includes('\\')) command[0] = path.resolve(directory, command[0]);
+  if (input.workingDirectory !== undefined && (typeof input.workingDirectory !== 'string' || !input.workingDirectory.trim() || input.workingDirectory.includes('\0'))) throw new ApiError('workingDirectory must be a nonempty directory path.', 500, 'workingDirectory');
   const models = input.models ?? (mode === 'global' ? { 'oc-default': { name: 'OpenCode default model', context: 128000, output: 16384 } } : undefined);
   if (!models || Array.isArray(models) || typeof models !== 'object' || !Object.keys(models).length) throw new ApiError('Configure at least one model.', 500);
   for (const [alias, model] of Object.entries(models)) {
@@ -41,10 +42,25 @@ export function normalizeConfig(input, directory = process.cwd()) {
     for (const key of ['context', 'output']) if (!Number.isInteger(model[key]) || model[key] <= 0) throw new ApiError('Each model needs positive integer context and output limits.', 500);
   }
   const config = { ...input, mode, command: [...command], models, discoverModels: input.discoverModels ?? (mode === 'global' && input.models === undefined), maxConcurrent: input.maxConcurrent ?? 0, timeoutMs: input.timeoutMs ?? 120000, startupTimeoutMs: input.startupTimeoutMs ?? 30000 };
+  if (input.workingDirectory !== undefined) config.workingDirectory = path.resolve(directory, input.workingDirectory);
   if (typeof config.discoverModels !== 'boolean' || (config.discoverModels && mode !== 'global')) throw new ApiError('discoverModels must be a boolean and is available only in global mode.', 500);
   if (!Number.isSafeInteger(config.maxConcurrent) || config.maxConcurrent < 0) throw new ApiError('maxConcurrent must be a nonnegative integer; 0 means unlimited.', 500);
   for (const key of ['timeoutMs', 'startupTimeoutMs']) if (!Number.isInteger(config[key]) || config[key] <= 0) throw new ApiError(`${key} must be a positive integer.`, 500);
   return config;
+}
+
+async function workerDirectory(config, temporary) {
+  if (config.workingDirectory !== undefined) {
+    const directory = config.workingDirectory;
+    const info = await stat(directory).catch(error => {
+      throw new ApiError(`OpenCode workingDirectory is unavailable (${error.code}): ${directory}`, 503, 'workingDirectory', 'opencode_working_directory');
+    });
+    if (!info.isDirectory()) throw new ApiError(`OpenCode workingDirectory is not a directory: ${directory}`, 503, 'workingDirectory', 'opencode_working_directory');
+    return directory;
+  }
+  const directory = path.join(temporary, 'workspace');
+  await mkdir(directory);
+  return directory;
 }
 
 function sandboxEnv(home) {
@@ -134,8 +150,7 @@ async function discoverGlobalModels(config) {
   let worker;
   const signal = AbortSignal.timeout(config.startupTimeoutMs);
   try {
-    const directory = path.join(home, 'workspace');
-    await mkdir(directory);
+    const directory = await workerDirectory(config, home);
     const command = await executableCommand(config.command);
     const port = await freePort();
     const password = randomBytes(24).toString('hex');
@@ -195,7 +210,7 @@ function mcpServer(body, token) {
       let result;
       switch (rpc.method) {
         case 'initialize':
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.8.0' } };
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.9.0' } };
           break;
         case 'ping': result = {}; break;
         case 'tools/list':
@@ -264,8 +279,8 @@ export class OpenCodeBridge {
     })();
     try {
       home = await mkdtemp(path.join(os.tmpdir(), 'magpie-oc-'));
-      const directory = path.join(home, 'workspace');
-      await mkdir(directory);
+      phase = 'working directory';
+      const directory = await workerDirectory(this.config, home);
       if (!global) await seedPluginDependency(home);
       const env = global ? globalEnv(home) : sandboxEnv(home);
       const command = await executableCommand(this.config.command);

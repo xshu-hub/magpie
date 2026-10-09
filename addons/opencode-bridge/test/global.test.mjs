@@ -4,7 +4,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, rm, symlink, stat, realpath } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { OpenCodeBridge } from '../lib/bridge.mjs';
 import { nativeToolName, sseEvents } from '../lib/protocol.mjs';
@@ -17,6 +17,9 @@ const saved = { ...process.env };
 const data = path.join(home, 'data', 'opencode');
 const configDir = path.join(home, 'config', 'opencode');
 const authFile = path.join(data, 'auth.json');
+const observationsFile = path.join(home, 'worker-directories.jsonl');
+const workingDirectory = path.join(home, 'workspace 中文 with spaces');
+const observations = async () => (await readFile(observationsFile, 'utf8')).trim().split('\n').map(JSON.parse);
 const requests = [];
 let refreshes = 0;
 let parallelRequests;
@@ -74,6 +77,10 @@ after(async () => {
 });
 await mkdir(data, { recursive: true });
 await mkdir(configDir, { recursive: true });
+await mkdir(workingDirectory);
+await writeFile(path.join(workingDirectory, 'keep.txt'), 'user-owned workspace');
+const projectConfig = '{"model":"project-must-not-load/missing"}';
+await writeFile(path.join(workingDirectory, 'opencode.json'), projectConfig);
 // Seed only the fixture's global SDK installation. Real user files are untouched.
 const sdk = process.env.TEST_OPENCODE_PLUGIN_DIR ?? path.resolve(path.dirname(fileURLToPath(import.meta.resolve('@opencode-ai/plugin'))), '..');
 const manifest = JSON.parse(await readFile(path.join(sdk, 'package.json'), 'utf8'));
@@ -81,7 +88,10 @@ await cp(sdk, path.join(configDir, 'node_modules', '@opencode-ai', 'plugin'), { 
 await writeFile(path.join(configDir, 'package.json'), JSON.stringify({ private: true, dependencies: { '@opencode-ai/plugin': manifest.version } }));
 await writeFile(path.join(configDir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { '@opencode-ai/plugin': manifest.version } }, 'node_modules/@opencode-ai/plugin': { version: manifest.version } } }));
 const loginPlugin = path.join(configDir, 'fixture-auth.mjs');
-await writeFile(loginPlugin, `export const FixtureAuth = async ({ client }) => ({
+await writeFile(loginPlugin, `import { appendFile } from 'node:fs/promises';
+export const FixtureAuth = async ({ client, directory }) => {
+  await appendFile(${JSON.stringify(observationsFile)}, JSON.stringify({ cwd: process.cwd(), directory, db: process.env.OPENCODE_DB, pid: process.pid }) + '\\n');
+  return {
   auth: { provider: 'fixture-oauth', methods: [], loader: async getAuth => ({
     apiKey: 'fixture-sdk-placeholder',
     fetch: async (url, init) => {
@@ -96,7 +106,8 @@ await writeFile(loginPlugin, `export const FixtureAuth = async ({ client }) => (
       return fetch(url, { ...init, headers });
     }
   }) }
-});\n`);
+  };
+};\n`);
 const globalConfig = {
   $schema: 'https://opencode.ai/config.json',
   model: 'fixture-oauth/mock',
@@ -193,6 +204,39 @@ test('real global v1 loads its configured OAuth plugin, refreshes its own login 
   assert.equal(auth.untouched.key, 'fixture-unrelated-key');
   assert.equal(await readFile(path.join(configDir, 'opencode.json'), 'utf8'), originalConfig);
   assert.equal((await readdir(data)).some(n => n.endsWith('.sqlite')), false, 'API sessions use a temporary database');
+  const worker = (await observations()).at(-1);
+  assert.equal(path.basename(worker.cwd), 'workspace');
+  assert.match(path.basename(path.dirname(worker.cwd)), /^magpie-oc-/);
+  await assert.rejects(() => stat(worker.cwd), { code: 'ENOENT' }, 'Default workspaces are cleaned after inference');
+});
+
+test('plugin config uses the chosen directory for discovery and inference without loading project config or deleting files', { timeout: 60000 }, async () => {
+  const file = path.join(home, 'custom-bridge.json');
+  await writeFile(file, JSON.stringify({ ...options, workingDirectory: './' + path.basename(workingDirectory), models: undefined, onFailure: undefined }));
+  const plugin = await OpenCodeBridgePlugin({}, { configFile: file });
+  const before = requests.length;
+  const cfg = {};
+  await plugin.config(cfg);
+  assert.ok(cfg.provider['opencode-bridge'].models['fixture-oauth/mock']);
+  assert.equal(requests.length, before, 'Discovery must not infer');
+  const discovered = (await observations()).at(-1);
+  assert.equal(await realpath(discovered.cwd), await realpath(workingDirectory));
+  assert.equal(await realpath(discovered.directory), await realpath(workingDirectory));
+  assert.match(path.basename(path.dirname(discovered.db)), /^magpie-oc-models-/);
+  await assert.rejects(() => stat(discovered.db), { code: 'ENOENT' });
+  const transport = await plugin.auth.loader(async () => ({ type: 'api', key: 'not-an-upstream-key' }));
+  const response = await transport.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'fixture-oauth/mock', messages: [{ role: 'user', content: 'Hello' }], stream: true }) });
+  assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
+  const chunks = await Array.fromAsync(sseEvents(response.body));
+  assert.equal(chunks.map(c => c.choices[0]?.delta.content ?? '').join(''), '复用全局 OpenCode 登录。');
+  assert.equal(requests.length, before + 1);
+  const inferred = (await observations()).at(-1);
+  assert.equal(await realpath(inferred.cwd), await realpath(workingDirectory));
+  assert.equal(await realpath(inferred.directory), await realpath(workingDirectory));
+  assert.notEqual(inferred.db, discovered.db);
+  await assert.rejects(() => stat(inferred.db), { code: 'ENOENT' });
+  assert.equal(await readFile(path.join(workingDirectory, 'keep.txt'), 'utf8'), 'user-owned workspace');
+  assert.equal(await readFile(path.join(workingDirectory, 'opencode.json'), 'utf8'), projectConfig);
 });
 test('any provider SDK can return complete tool batches without local execution or a second inference', { timeout: 120000 }, async () => {
   const before = requests.length;
@@ -312,8 +356,8 @@ test('a plugin with no config.json uses global OpenCode and discovers its models
   await assert.rejects(() => OpenCodeBridgePlugin({}, { configFile: path.join(home, 'missing-explicit-config.json') }), { code: 'ENOENT' });
 });
 
-test('global workers infer concurrently and cancelling one does not cancel the other sessions', { timeout: 90000 }, async () => {
-  const instance = new OpenCodeBridge({ ...options, models: {
+test('global workers share a configured directory while concurrent inference and cancellation remain isolated', { timeout: 90000 }, async () => {
+  const instance = new OpenCodeBridge({ ...options, workingDirectory, models: {
     ...options.models,
     'saved-api': { model: 'fixture-api/mock', context: 100000, output: 1000 },
   } });
@@ -321,6 +365,7 @@ test('global workers infer concurrently and cancelling one does not cancel the o
   parallelRequests = new Map(labels.map(label => [label, { started: Promise.withResolvers(), release: Promise.withResolvers() }]));
   const controllers = labels.map(() => new AbortController());
   const before = requests.length;
+  const beforeWorkers = (await observations()).length;
   const jobs = labels.map(async (label, i) => {
     const body = { model: i % 2 ? 'saved-api' : 'oc-default', messages: [{ role: 'user', content: label }], stream: i % 2 === 0, stream_options: { include_usage: true } };
     const response = await instance.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify(body), signal: controllers[i].signal }, 'not-the-upstream-key');
@@ -366,6 +411,16 @@ test('global workers infer concurrently and cancelling one does not cancel the o
     const auth = JSON.parse(await readFile(authFile, 'utf8'));
     assert.equal(auth.untouched.key, 'fixture-unrelated-key');
     assert.equal((await readdir(data)).some(n => n.endsWith('.sqlite')), false);
+    const workers = (await observations()).slice(beforeWorkers);
+    assert.equal(new Set(workers.map(w => w.pid)).size, 4, 'All four requests have different OpenCode processes');
+    assert.equal(new Set(workers.map(w => w.db)).size, 4, 'Sharing cwd must not share session databases');
+    for (const worker of workers) {
+      assert.equal(await realpath(worker.cwd), await realpath(workingDirectory));
+      assert.equal(await realpath(worker.directory), await realpath(workingDirectory));
+      await assert.rejects(() => stat(worker.db), { code: 'ENOENT' });
+    }
+    assert.equal(await readFile(path.join(workingDirectory, 'keep.txt'), 'utf8'), 'user-owned workspace');
+    assert.equal(await readFile(path.join(workingDirectory, 'opencode.json'), 'utf8'), projectConfig);
   } finally {
     clearTimeout(deadline);
     for (const controller of controllers) controller.abort();

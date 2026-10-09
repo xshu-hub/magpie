@@ -100,7 +100,20 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 		"models": map[string]any{"oc-mock": map[string]any{"protocol": "openai-chat", "baseURL": up.URL + "/v1", "id": "mock", "context": 100000, "output": 1000}},
 	}
 	addon, _ := filepath.Abs("../../addons/opencode-bridge")
+	var workingDirectory, observationsFile string
 	if global {
+		workingDirectory = filepath.Join(t.TempDir(), "workspace 中文 with spaces")
+		if err := os.MkdirAll(workingDirectory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(workingDirectory, "keep.txt"), []byte("user-owned workspace"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(workingDirectory, "opencode.json"), []byte(`{"model":"project-must-not-load/missing"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		config["workingDirectory"] = workingDirectory
+		observationsFile = filepath.Join(t.TempDir(), "directories.jsonl")
 		if runtime.GOOS == "windows" && len(cmd) == 1 {
 			bin := t.TempDir()
 			root := filepath.Join(bin, "node_modules", "@opencode", "opencode-ai")
@@ -155,8 +168,15 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 		deps := map[string]string{"@opencode-ai/plugin": pkg.Version}
 		write(filepath.Join(dir, "package.json"), map[string]any{"private": true, "dependencies": deps})
 		write(filepath.Join(dir, "package-lock.json"), map[string]any{"lockfileVersion": 3, "packages": map[string]any{"": map[string]any{"dependencies": deps}, "node_modules/@opencode-ai/plugin": map[string]any{"version": pkg.Version}}})
+		fixturePlugin := filepath.Join(dir, "directory-fixture.mjs")
+		encodedFile, _ := json.Marshal(observationsFile)
+		fixtureSource := fmt.Sprintf("import { appendFile } from 'node:fs/promises';\nexport const DirectoryFixture = async ({directory}) => { await appendFile(%s, JSON.stringify({cwd:process.cwd(), directory, db:process.env.OPENCODE_DB}) + '\\n'); return {}; };\n", encodedFile)
+		if err := os.WriteFile(fixturePlugin, []byte(fixtureSource), 0600); err != nil {
+			t.Fatal(err)
+		}
 		write(filepath.Join(dir, "opencode.json"), map[string]any{
 			"$schema": "https://opencode.ai/config.json", "model": "fixture-global/mock",
+			"plugin": []string{fixturePlugin},
 			"provider": map[string]any{"fixture-global": map[string]any{
 				"npm": "@ai-sdk/openai-compatible", "options": map[string]any{"baseURL": up.URL + "/v1"},
 				"models": map[string]any{"mock": map[string]any{"limit": map[string]int{"context": 100000, "output": 1000}}},
@@ -306,6 +326,46 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 	}
 	if calls.Load() != 8 || concurrentCalls.Load() != 4 {
 		t.Errorf("eight client requests caused %d upstream inferences, %d concurrent", calls.Load(), concurrentCalls.Load())
+	}
+	if global {
+		observations, err := os.ReadFile(observationsFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		selectedDirectory, err := os.Stat(workingDirectory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		databases := map[string]bool{}
+		for _, line := range strings.Split(strings.TrimSpace(string(observations)), "\n") {
+			var worker struct{ Cwd, Directory, DB string }
+			if err := json.Unmarshal([]byte(line), &worker); err != nil {
+				t.Fatal(err)
+			}
+			// Windows may report an 8.3 path in cwd and the long path in hooks.
+			for _, directory := range []string{worker.Cwd, worker.Directory} {
+				info, err := os.Stat(directory)
+				if err != nil || !os.SameFile(info, selectedDirectory) {
+					t.Errorf("OpenCode discovery and inference must use workingDirectory: %s (%v)", directory, err)
+				}
+			}
+			if worker.DB == "" {
+				t.Fatal("each worker must use its temporary database")
+			}
+			databases[worker.DB] = true
+			if _, err := os.Stat(worker.DB); !os.IsNotExist(err) {
+				t.Errorf("temporary database remains after cleanup: %s (%v)", worker.DB, err)
+			}
+		}
+		if len(databases) < 9 {
+			t.Errorf("discovery and eight inferences must have independent databases; got %d", len(databases))
+		}
+		for name, want := range map[string]string{"keep.txt": "user-owned workspace", "opencode.json": `{"model":"project-must-not-load/missing"}`} {
+			value, err := os.ReadFile(filepath.Join(workingDirectory, name))
+			if err != nil || string(value) != want {
+				t.Errorf("workspace file %s was changed or removed: %q (%v)", name, value, err)
+			}
+		}
 	}
 }
 

@@ -88,8 +88,14 @@ adds the independent `opencode-bridge` provider. Its default example drives the
 global, unmodified OpenCode installation with its existing
 configuration, login and authentication plugins. OpenCode owns upstream calls
 and persists token refreshes in its genuine auth store; the bridge does not
-implement supplier authentication. API workspaces and session databases remain
-temporary. Concurrent requests use independent workers, sessions, MCP servers
+implement supplier authentication. Session databases and request files remain
+temporary. Workspaces default to a per-worker temporary directory; the optional
+`workingDirectory` setting uses an existing administrator-selected cwd for both
+catalog discovery and inference. Relative paths resolve against the bridge
+config file. Missing paths and files return a specific directory error before
+startup. Cleanup removes only the temporary request directory, never the selected
+cwd. Project-level OpenCode config and built-in local tools remain disabled.
+Concurrent requests can share the selected cwd but use independent workers, sessions, MCP servers
 and cancellation signals. Both modes have no bridge concurrency limit by
 default (`maxConcurrent: 0`); a positive value explicitly opts into a limit.
 OpenCode and its authentication plugins own concurrent refresh behavior in

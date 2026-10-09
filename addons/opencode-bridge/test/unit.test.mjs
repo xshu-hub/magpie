@@ -1,9 +1,48 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { validateRequest, toNativeHistory, nativeToolName, usageOf, sseEvents } from '../lib/protocol.mjs';
-import { normalizeConfig } from '../lib/bridge.mjs';
+import { OpenCodeBridge, normalizeConfig } from '../lib/bridge.mjs';
 const models = { test: { output: 100 } };
 const base = () => ({ model: 'test', messages: [{ role: 'user', content: 'Hello' }] });
+
+test('workingDirectory resolves relative to the config file and rejects invalid path values', () => {
+  const directory = path.resolve('fixture-config');
+  const relative = 'workspace 中文 with spaces';
+  assert.equal(normalizeConfig({ mode: 'global', workingDirectory: relative }, directory).workingDirectory, path.join(directory, relative));
+  const absolute = path.resolve(relative);
+  assert.equal(normalizeConfig({ mode: 'global', workingDirectory: absolute }, directory).workingDirectory, absolute);
+  assert.equal(normalizeConfig({ mode: 'global' }, directory).workingDirectory, undefined);
+  for (const workingDirectory of ['', '   ', '\0', null, false, 42, [], {}]) assert.throws(() => normalizeConfig({ mode: 'global', workingDirectory }, directory), /workingDirectory/);
+});
+
+test('missing directories and file paths fail before OpenCode starts and cleanup preserves user files', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'bridge-directory-test-'));
+  const sentinel = path.join(directory, 'keep.txt');
+  await writeFile(sentinel, 'user-owned');
+  try {
+    for (const workingDirectory of [path.join(directory, 'missing'), sentinel]) {
+      let temporary;
+      const bridge = new OpenCodeBridge({ mode: 'global', discoverModels: false, workingDirectory, command: [path.join(directory, 'missing-opencode.exe')], onFailure: async ({ home }) => { temporary = home; } });
+      const response = await bridge.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'oc-default', messages: [{ role: 'user', content: 'Hello' }] }) });
+      const result = await response.json();
+      assert.equal(response.status, 503);
+      assert.equal(result.error.code, 'opencode_working_directory', JSON.stringify(result));
+      assert.equal(result.error.param, 'workingDirectory');
+      assert.ok(result.error.message.includes(workingDirectory));
+      assert.equal(bridge.active, 0);
+      assert.equal(await readFile(sentinel, 'utf8'), 'user-owned');
+      await assert.rejects(() => stat(temporary), { code: 'ENOENT' });
+      const catalog = new OpenCodeBridge({ mode: 'global', workingDirectory, command: [path.join(directory, 'missing-opencode.exe')] });
+      const listing = await catalog.fetch('http://bridge/v1/models');
+      assert.equal(listing.status, 503);
+      assert.equal((await listing.json()).error.code, 'opencode_working_directory');
+      assert.equal(await readFile(sentinel, 'utf8'), 'user-owned');
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 test('global mode needs no supplier configuration or upstream key and defaults to unlimited concurrency', () => {
   const config = normalizeConfig({ mode: 'global' });
   assert.deepEqual(config.command, ['opencode']);
