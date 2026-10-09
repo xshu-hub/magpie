@@ -2,12 +2,11 @@ import http from 'node:http';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { mkdtemp, mkdir, writeFile, rm, symlink, cp, readFile, access } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, cp, readFile, access } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { ApiError, validateRequest, toolName, nativeToolName, usageOf, sseEvents } from './protocol.mjs';
 
-export const OPENCODE_VERSION = '1.18.35';
 const SDK = { 'openai-chat': '@ai-sdk/openai-compatible', 'openai-responses': '@ai-sdk/openai', anthropic: '@ai-sdk/anthropic' };
 const delay = (ms, signal) => new Promise((resolve, reject) => {
   signal?.throwIfAborted();
@@ -64,7 +63,7 @@ async function executableCommand(command) {
   }
   if (/\.(cmd|bat|ps1)$/i.test(selected)) {
     for (const root of [path.join(path.dirname(selected), 'node_modules', 'opencode-ai'), path.resolve(path.dirname(selected), '..', 'opencode-ai')]) {
-      const pkg = await readFile(path.join(root, 'package.json'), 'utf8').then(JSON.parse, () => undefined);
+      const pkg = await readFile(path.join(root, 'package.json'), 'utf8').then(text => JSON.parse(text.replace(/^\uFEFF/, '')), () => undefined);
       const bin = typeof pkg?.bin === 'string' ? pkg.bin : pkg?.bin?.opencode;
       if (pkg?.name === 'opencode-ai' && typeof bin === 'string') return [path.resolve(root, bin), ...command.slice(1)];
     }
@@ -82,7 +81,7 @@ function sandboxEnv(home) {
     TMP: home, TEMP: home, TMPDIR: home,
     OPENCODE_DISABLE_PROJECT_CONFIG: '1', OPENCODE_DISABLE_AUTOUPDATE: '1', OPENCODE_DISABLE_MODELS_FETCH: '1',
     OPENCODE_DISABLE_DEFAULT_PLUGINS: '1', OPENCODE_DISABLE_EXTERNAL_SKILLS: '1', OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
-    OPENCODE_DISABLE_AUTOCOMPACT: '1', OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: '1', OPENCODE_EXPERIMENTAL_NATIVE_LLM: '1',
+    OPENCODE_DISABLE_AUTOCOMPACT: '1', OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: '1', OPENCODE_EXPERIMENTAL_NATIVE_LLM: '0',
   });
   return env;
 }
@@ -101,17 +100,17 @@ function globalEnv(home) {
 
 async function seedPluginDependency(home) {
   // OpenCode installs its plugin SDK when it sees a plugin, even one with no imports.
-  // Reuse the genuine, pinned npm dependency so isolated requests need no npm network call.
+  // Seed a genuine SDK cache. OpenCode may select its own matching SDK version;
+  // this dependency's version never gates the configured executable.
   const entry = fileURLToPath(import.meta.resolve('@opencode-ai/plugin'));
-  const source = path.resolve(path.dirname(entry), '..');
-  const manifest = JSON.parse(await readFile(path.join(source, 'package.json'), 'utf8'));
-  if (manifest.version !== OPENCODE_VERSION) throw new ApiError('The OpenCode plugin SDK dependency must match the pinned v1 version.', 503);
+  const source = process.env.TEST_OPENCODE_PLUGIN_DIR ?? path.resolve(path.dirname(entry), '..');
+  const manifest = JSON.parse((await readFile(path.join(source, 'package.json'), 'utf8')).replace(/^\uFEFF/, ''));
   const dir = path.join(home, 'config', 'opencode');
   const scoped = path.join(dir, 'node_modules', '@opencode-ai');
   await mkdir(scoped, { recursive: true });
   const target = path.join(scoped, 'plugin');
-  try { await symlink(source, target, process.platform === 'win32' ? 'junction' : 'dir'); }
-  catch { await cp(source, target, { recursive: true }); }
+  // Copy instead of linking: another runtime can update its sandbox SDK safely.
+  await cp(source, target, { recursive: true });
   const dependencies = { '@opencode-ai/plugin': manifest.version };
   await writeFile(path.join(dir, 'package.json'), JSON.stringify({ private: true, dependencies }));
   await writeFile(path.join(dir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies }, 'node_modules/@opencode-ai/plugin': { version: manifest.version } } }));
@@ -155,7 +154,7 @@ async function freePort() {
   return port;
 }
 
-function mcpServer(body, token, deferred) {
+function mcpServer(body, token) {
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url !== '/' + token) return res.writeHead(404).end();
@@ -172,16 +171,13 @@ function mcpServer(body, token, deferred) {
       let result;
       switch (rpc.method) {
         case 'initialize':
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.2.0' } };
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.3.0' } };
           break;
         case 'ping': result = {}; break;
         case 'tools/list':
           result = { tools: (body.tool_choice === 'none' ? [] : body.tools ?? []).map(t => ({ name: toolName(t.function.name), description: t.function.description ?? t.function.name, inputSchema: t.function.parameters ?? { type: 'object', properties: {} } })) };
           break;
         case 'tools/call':
-          // OpenCode owns execution, but the client must supply the result in its next API request.
-          // Park until the model's step-finish event; the worker is then aborted and discarded.
-          if (!deferred) return;
           // Acknowledge deferral only. No client function runs here. This lets
           // the standard SDK publish finish-step for every provider; the public
           // message hook blocks a second model step until this worker is aborted.
@@ -216,7 +212,8 @@ export class OpenCodeBridge {
     const upstreamKey = model.apiKeyEnv ? process.env[model.apiKeyEnv] : apiKey;
     if (!global && !upstreamKey) throw new ApiError('Upstream API key is missing. Set the configured apiKeyEnv or sign in to the Magpie plugin.', 503, null, 'missing_upstream_key');
     this.active++;
-    let home, mcp, version, worker, sessionID, eventController;
+    let home, mcp, worker, sessionID, eventController;
+    let reportedVersion;
     let phase = 'creating sandbox';
     const controller = new AbortController();
     const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
@@ -227,33 +224,28 @@ export class OpenCodeBridge {
       clearTimeout(timeout);
       eventController?.abort();
       if (sessionID && api) await api(`/session/${sessionID}/abort`, {}, AbortSignal.timeout(2000)).catch(() => {});
-      await stop(version);
       await stop(worker);
       if (mcp) { mcp.closeAllConnections(); await new Promise(r => mcp.close(r)); }
       if (home) await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
       this.active--;
     })();
     try {
-      home = await mkdtemp(path.join(os.tmpdir(), 'magpie-oc-v1-'));
+      home = await mkdtemp(path.join(os.tmpdir(), 'magpie-oc-'));
       const directory = path.join(home, 'workspace');
       await mkdir(directory);
       if (!global) await seedPluginDependency(home);
       const env = global ? globalEnv(home) : sandboxEnv(home);
       const command = await executableCommand(this.config.command);
-      phase = 'version check';
-      version = start(command, ['--version'], { env, cwd: directory, signal: combined });
-      const checked = await version.done;
-      if (checked.error || checked.code !== 0) throw new ApiError('Cannot start configured OpenCode v1 executable.', 503, null, 'opencode_unavailable');
-      if (checked.output.trim() !== OPENCODE_VERSION) throw new ApiError(`This bridge requires official OpenCode v${OPENCODE_VERSION}; configured executable reports ${checked.output.trim().slice(0, 100)}.`, 503, null, 'opencode_version');
       const token = randomBytes(24).toString('hex');
-      mcp = mcpServer(body, token, global);
+      mcp = mcpServer(body, token);
       const mcpPort = await listen(mcp);
       const port = await freePort();
       const password = randomBytes(24).toString('hex');
       const providerID = global ? model.model?.split('/')[0] : 'opencode-bridge';
       const modelID = global ? model.model?.slice(providerID.length + 1) : model.id;
       const requestFile = path.join(home, 'request.json');
-      await writeFile(requestFile, JSON.stringify({ body, modelID, providerID, outputLimit: model.output, global }), { mode: 0o600 });
+      const hookFile = path.join(home, 'hooks-ready.json');
+      await writeFile(requestFile, JSON.stringify({ body, modelID, providerID, outputLimit: model.output, global, hookFile }), { mode: 0o600 });
       const permissions = { '*': 'deny', 'bridge_*': 'allow' };
       const config = {
         ...(global
@@ -272,10 +264,11 @@ export class OpenCodeBridge {
       const base = 'http://127.0.0.1:' + port;
       api = async (endpoint, payload, requestSignal = combined) => {
         const r = await fetch(base + endpoint, { headers, signal: requestSignal, ...(payload !== undefined ? { method: 'POST', body: JSON.stringify(payload) } : {}) });
-        if (!r.ok) throw new ApiError(`OpenCode server returned HTTP ${r.status}.`, 502, null, 'opencode_server_error');
+        if (!r.ok) throw new ApiError(`OpenCode endpoint ${endpoint} returned HTTP ${r.status}.`, 502, null, 'opencode_server_error');
         return r.status === 204 ? null : r.json();
       };
       const deadline = Date.now() + this.config.startupTimeoutMs;
+      let lastStartupError;
       while (true) {
         combined.throwIfAborted();
         if (worker.error || worker.child.exitCode !== null) throw new ApiError('OpenCode server exited during startup.', 503, null, 'opencode_startup');
@@ -283,11 +276,11 @@ export class OpenCodeBridge {
         // Bound each probe so that an early connection cannot consume the request's whole timeout.
         try {
           const health = await api('/global/health', undefined, AbortSignal.any([combined, AbortSignal.timeout(1000)]));
-          if (health.version !== OPENCODE_VERSION) throw new ApiError('OpenCode server version differs from the pinned v1 executable.', 503, null, 'opencode_version');
+          if (typeof health.version === 'string' && /^[A-Za-z0-9._+-]{1,128}$/.test(health.version)) reportedVersion = health.version;
           break;
         } catch (error) {
-          if (error instanceof ApiError && error.code === 'opencode_version') throw error;
-          if (Date.now() >= deadline) throw new ApiError('OpenCode server startup timed out.', 503, null, 'opencode_startup');
+          if (error instanceof ApiError) lastStartupError = error.message;
+          if (Date.now() >= deadline) throw new ApiError('OpenCode server startup timed out.' + (lastStartupError ? ' ' + lastStartupError : ''), 503, null, 'opencode_startup');
           await delay(100, combined);
         }
       }
@@ -315,17 +308,46 @@ export class OpenCodeBridge {
           await delay(100, eventSignal);
         }
       } finally { clearTimeout(connectTimeout); }
-      const events = (async function* () {
-        try { yield initial.value; yield* iterator; }
-        finally { await iterator.return(); }
-      })();
       phase = 'inference';
       await api(`/session/${sessionID}/prompt_async`, { ...(providerID ? { model: { providerID, modelID } } : {}), agent: 'bridge', parts: [{ type: 'text', text: 'Complete the current client request.' }] });
-      return { events, sessionID, cleanup, signal: combined, abort: () => api(`/session/${sessionID}/abort`, {}, AbortSignal.timeout(2000)),
+      phase = 'message and parameter hooks';
+      const hookDeadline = Date.now() + this.config.startupTimeoutMs;
+      const buffered = [initial.value];
+      const nextEvent = () => iterator.next().then(event => ({ event }), error => ({ error }));
+      let pending = nextEvent();
+      while (true) {
+        combined.throwIfAborted();
+        const ready = await readFile(hookFile, 'utf8').then(JSON.parse, () => undefined).catch(() => undefined);
+        if (ready?.history === true && ready?.params === true) break;
+        if (worker.error || worker.child.exitCode !== null || Date.now() >= hookDeadline) throw new ApiError('OpenCode did not invoke the required message and parameter hooks. Check runtime/plugin compatibility.', 503, null, 'opencode_hooks_incompatible');
+        const next = await Promise.race([pending, delay(50, combined).then(() => ({}))]);
+        if (next.error) throw next.error;
+        if (!next.event) continue;
+        if (next.event.done) throw new ApiError('OpenCode event stream closed before request preparation.', 502, null, 'opencode_events');
+        const event = next.event.value;
+        const p = event.properties ?? {};
+        if (p.sessionID === sessionID || p.info?.sessionID === sessionID) {
+          if (event.type === 'session.error') throw new ApiError(p.error?.data?.message ?? 'OpenCode could not prepare inference.', 502, null, 'opencode_session_error');
+          if (p.info?.error) throw new ApiError(p.info.error.data?.message ?? 'OpenCode could not prepare inference.', 502, null, 'opencode_inference_error');
+        }
+        buffered.push(event);
+        if (buffered.length > 1024) throw new ApiError('OpenCode emitted model events without confirming the required hooks.', 503, null, 'opencode_hooks_incompatible');
+        pending = nextEvent();
+      }
+      const events = (async function* () {
+        try {
+          yield* buffered;
+          const next = await pending;
+          if (next.error) throw next.error;
+          if (!next.event.done) { yield next.event.value; yield* iterator; }
+        } finally { await iterator.return(); }
+      })();
+      phase = 'inference';
+      return { events, sessionID, cleanup, signal: combined, version: reportedVersion, abort: () => api(`/session/${sessionID}/abort`, {}, AbortSignal.timeout(2000)),
         diagnose: async details => { if (typeof this.config.onFailure === 'function') await this.config.onFailure({ phase, home, output: worker?.output ?? '', ...details }).catch(() => {}); },
       };
     } catch (error) {
-      if (typeof this.config.onFailure === 'function') await this.config.onFailure({ phase, home, output: worker?.output ?? version?.output ?? '' }).catch(() => {});
+      if (typeof this.config.onFailure === 'function') await this.config.onFailure({ phase, home, output: worker?.output ?? '' }).catch(() => {});
       await cleanup();
       throw combined.aborted ? combined.reason : error;
     }
@@ -354,7 +376,7 @@ export class OpenCodeBridge {
           if (chunk.usage) usage = chunk.usage;
         }
         const message = { role: 'assistant', content: content || null, ...(calls.length ? { tool_calls: calls } : {}), ...(reasoning ? { reasoning_content: reasoning } : {}) };
-        return Response.json({ id, object: 'chat.completion', created, model: body.model, choices: [{ index: 0, message, finish_reason: finish, logprobs: null }], usage });
+        return Response.json({ id, object: 'chat.completion', created, model: body.model, choices: [{ index: 0, message, finish_reason: finish, logprobs: null }], usage }, { headers: run.version ? { 'x-opencode-version': run.version } : {} });
       }
       const encoder = new TextEncoder();
       const stream = new ReadableStream({
@@ -371,7 +393,7 @@ export class OpenCodeBridge {
         },
         async cancel() { await run.cleanup(); await chunks.return(); },
       });
-      return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'x-opencode-version': OPENCODE_VERSION } });
+      return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', ...(run.version ? { 'x-opencode-version': run.version } : {}) } });
     } catch (e) {
       const error = e instanceof ApiError ? e : new ApiError(init.signal?.aborted ? 'Request cancelled.' : 'OpenCode bridge failed.', init.signal?.aborted ? 499 : 502, null, 'opencode_error');
       return Response.json(error.body(), { status: error.status, ...(error.status === 429 ? { headers: { 'retry-after': '1' } } : {}) });
@@ -428,7 +450,7 @@ export class OpenCodeBridge {
         if (part.type === 'step-finish') {
           if (part.reason === 'tool-calls' && !toolIDs.size) throw new ApiError('OpenCode finished a tool batch without usable calls.', 502);
           if (!['stop', 'length', 'tool-calls'].includes(part.reason)) throw new ApiError(`Unsupported OpenCode finish reason: ${part.reason}.`, 502);
-          // The native v1 runtime publishes this before waiting for client-owned MCP calls.
+          // The standard SDK publishes this after the MCP deferral acknowledgements.
           await run.abort();
           const usage = usageOf(part.tokens);
           const reason = part.reason === 'tool-calls' ? 'tool_calls' : part.reason;

@@ -7,7 +7,7 @@ import { OpenCodeBridge } from '../lib/bridge.mjs';
 import { nativeToolName, sseEvents } from '../lib/protocol.mjs';
 
 const command = process.env.TEST_OPENCODE_COMMAND;
-if (!command) throw new Error('Set TEST_OPENCODE_COMMAND to a JSON executable/argument array for official OpenCode v1.18.35.');
+if (!command) throw new Error('Set TEST_OPENCODE_COMMAND to a JSON executable/argument array for OpenCode.');
 const requests = [];
 const upstream = http.createServer(async (req, res) => {
   let raw = ''; for await (const c of req) raw += c;
@@ -49,6 +49,7 @@ test('real unmodified v1 initiates inference with role history, system and gener
   const response = await request({ messages: [{ role: 'system', content: 'SYSTEM_SENTINEL' }, { role: 'user', content: 'Previous user' }, { role: 'assistant', content: 'Previous assistant' }, { role: 'user', content: 'Say hello' }], temperature: 0.2, top_p: 0.9, max_tokens: 123 });
   const result = await response.json();
   assert.equal(response.status, 200, JSON.stringify(result));
+  if (process.env.TEST_OPENCODE_VERSION) assert.equal(response.headers.get('x-opencode-version'), process.env.TEST_OPENCODE_VERSION);
   assert.equal(result.choices[0].message.content, '你好，OpenCode v1。');
   assert.equal(result.choices[0].finish_reason, 'stop');
   assert.equal(result.usage.total_tokens, 15);

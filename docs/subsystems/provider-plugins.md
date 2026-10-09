@@ -83,9 +83,9 @@ The GUI's plugin integration includes `subOf`, `pluginSubs`, and `startPluginSig
 
 ## Verification
 
-The optional [OpenCode v1 bridge addon](../../addons/opencode-bridge/README.md)
+The optional [OpenCode bridge addon](../../addons/opencode-bridge/README.md)
 adds the independent `opencode-bridge` provider. Its default example drives the
-global, unmodified official OpenCode 1.18.35 installation with its existing
+global, unmodified OpenCode installation with its existing
 configuration, login and authentication plugins. OpenCode owns upstream calls
 and persists token refreshes in its genuine auth store; the bridge does not
 implement supplier authentication. API workspaces and session databases remain
@@ -93,11 +93,14 @@ temporary. Global mode serializes requests sharing login state and uses the
 standard SDK runtime. MCP acknowledges client-tool deferral, allowing a complete
 model step to finish, while the public message hook gates further inference
 before the worker is aborted. Only clients execute their real functions, and
-the next request replays their actual results. Legacy isolated mode still uses
-explicit API keys and the native runtime with parked MCP calls.
+the next request replays their actual results. Isolated mode uses explicit API
+keys and the same standard runtime. Startup confirms the required HTTP APIs and
+message/parameter hooks without a version allowlist. Actual health metadata is
+reported in the version header when available. CI exercises official 1.16.2 and
+1.18.35 on Windows and Linux; other runtimes are attempted by their capabilities.
 `TestOpenCodeV1Bridge` in `internal/gateway/opencode_bridge_test.go` is an opt-in
 real gateway/host/binary check; the addon has Node protocol and real OpenCode tests.
-The addon README records the supported API subset and experimental-v1 constraints.
+The addon README records the supported API subset and experimental-hook constraints.
 
 [`migrate_notice_test.go`](../../internal/provider/migrate_notice_test.go) includes `TestMovedBuiltinsSayTheirPlugin`, which checks that moved built-ins tell contributors which plugin serves them. Migration tests live beside [`migrate.go`](../../internal/provider/migrate.go).
 

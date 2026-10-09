@@ -14,11 +14,11 @@ const value = (flag, fallback) => {
   return args[index + 1];
 };
 if (args.includes('--help')) {
-  console.log('Usage: magpie-opencode-bridge --config config.json [--port 8787] [--opencode /path/to/v1/executable]\nSet BRIDGE_API_KEY for client authentication. Global mode reuses OpenCode login; isolated mode needs an upstream API key.');
+  console.log('Usage: magpie-opencode-bridge --config config.json [--port 8787] [--opencode /path/to/executable]\nSet BRIDGE_API_KEY for client authentication. Global mode reuses OpenCode login; isolated mode needs an upstream API key.');
   process.exit(0);
 }
 const configFile = path.resolve(value('--config', 'config.json'));
-const config = normalizeConfig(JSON.parse(await readFile(configFile, 'utf8')), path.dirname(configFile));
+const config = normalizeConfig(JSON.parse((await readFile(configFile, 'utf8')).replace(/^\uFEFF/, '')), path.dirname(configFile));
 if (args.includes('--opencode')) config.command = [path.resolve(value('--opencode'))];
 const bridge = new OpenCodeBridge(config);
 const key = process.env.BRIDGE_API_KEY;
@@ -67,7 +67,7 @@ const server = http.createServer(async (req, res) => {
 });
 server.requestTimeout = 30000;
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
-console.log(`OpenCode v1 bridge listening on http://127.0.0.1:${server.address().port}/v1`);
+console.log(`OpenCode bridge listening on http://127.0.0.1:${server.address().port}/v1`);
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
   for (const controller of controllers) controller.abort();
   server.close(); server.closeAllConnections();

@@ -94,7 +94,11 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.CopyFS(filepath.Join(dir, "node_modules", "@opencode-ai", "plugin"), os.DirFS(filepath.Join(addon, "node_modules", "@opencode-ai", "plugin"))); err != nil {
+		sdk := os.Getenv("TEST_OPENCODE_PLUGIN_DIR")
+		if sdk == "" {
+			sdk = filepath.Join(addon, "node_modules", "@opencode-ai", "plugin")
+		}
+		if err := os.CopyFS(filepath.Join(dir, "node_modules", "@opencode-ai", "plugin"), os.DirFS(sdk)); err != nil {
 			t.Fatal(err)
 		}
 		write := func(file string, value any) {
@@ -110,9 +114,17 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 				t.Fatal(err)
 			}
 		}
-		deps := map[string]string{"@opencode-ai/plugin": "1.18.35"}
+		manifest, err := os.ReadFile(filepath.Join(sdk, "package.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pkg struct{ Version string }
+		if err := json.Unmarshal(manifest, &pkg); err != nil || pkg.Version == "" {
+			t.Fatalf("OpenCode SDK manifest: %v", err)
+		}
+		deps := map[string]string{"@opencode-ai/plugin": pkg.Version}
 		write(filepath.Join(dir, "package.json"), map[string]any{"private": true, "dependencies": deps})
-		write(filepath.Join(dir, "package-lock.json"), map[string]any{"lockfileVersion": 3, "packages": map[string]any{"": map[string]any{"dependencies": deps}, "node_modules/@opencode-ai/plugin": map[string]any{"version": "1.18.35"}}})
+		write(filepath.Join(dir, "package-lock.json"), map[string]any{"lockfileVersion": 3, "packages": map[string]any{"": map[string]any{"dependencies": deps}, "node_modules/@opencode-ai/plugin": map[string]any{"version": pkg.Version}}})
 		write(filepath.Join(dir, "opencode.json"), map[string]any{
 			"$schema": "https://opencode.ai/config.json", "model": "fixture-global/mock",
 			"provider": map[string]any{"fixture-global": map[string]any{
@@ -125,6 +137,8 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 		config["models"] = map[string]any{"oc-mock": map[string]any{"context": 100000, "output": 1000}}
 	}
 	b, _ := json.Marshal(config)
+	// PowerShell can save JSON with a UTF-8 BOM; the installed plugin accepts it.
+	b = append([]byte("\xef\xbb\xbf"), b...)
 	file := filepath.Join(t.TempDir(), "bridge.json")
 	if err := os.WriteFile(file, b, 0600); err != nil {
 		t.Fatal(err)

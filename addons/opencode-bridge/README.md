@@ -1,12 +1,12 @@
-# Magpie OpenCode v1 bridge
+# Magpie OpenCode bridge
 
-0.2.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
+0.3.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号**。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
 
-请求方向：客户端 → Magpie → 插件 → 全局 OpenCode v1 → 它配置的上游。也可运行独立的 OpenAI Chat HTTP 服务。
+请求方向：客户端 → Magpie → 插件 → 全局 OpenCode → 它配置的上游。也可运行独立的 OpenAI Chat HTTP 服务。
 
 ## Windows 安装
 
-需要 Node.js 22+，以及在 PATH 上能够运行的官方 **OpenCode 1.18.35**。Magpie 首次启动插件时会下载自己的 Bun 宿主。
+需要 Node.js 22+，以及在 PATH 上能够运行的 OpenCode。Magpie 首次启动插件时会下载自己的 Bun 宿主。
 
 先检查全局程序：
 
@@ -15,12 +15,12 @@ opencode --version
 opencode models
 ```
 
-版本须为 `1.18.35`，并且这个全局 OpenCode 自己已能使用目标账号和模型完成对话。本插件不登录或转移供应商账号。v2 会被明确拒绝；v2 登录是否可由 v1 读取取决于 OpenCode 自己的兼容性。如果需要把全局 npm 命令切换到已验证的 v1，可执行 `npm install -g opencode-ai@1.18.35`；这会替换该全局命令。
+确认这个全局 OpenCode 自己已能使用目标账号和模型完成对话。本插件不登录或转移供应商账号，不替换全局安装，也不要求升级到指定版本。1.16.2 和 1.18.35 已纳入真实程序测试；其他版本照常尝试接入。兼容性取决于它实际提供的 HTTP API 和插件 hooks，接口缺失时会返回具体错误。
 
 下载构建 ZIP，解压到例如 `C:\Magpie-OpenCode`，在该目录执行：
 
 ```powershell
-tar -xzf xshu-hub-magpie-opencode-bridge-0.2.0.tgz
+tar -xzf xshu-hub-magpie-opencode-bridge-0.3.0.tgz
 npm install --prefix package --ignore-scripts --no-audit --no-fund
 Copy-Item .\package\config.example.json .\package\config.json
 
@@ -89,7 +89,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 
 每个请求启动同一全局安装中的 OpenCode 程序，工作目录与会话数据库是临时文件。HOME、配置、登录和认证插件保留原路径，所以 token 刷新由 OpenCode 写回真实登录文件，不是复制一份快照再丢弃。桥接代码不解析或发送供应商 token。
 
-全局模式使用 OpenCode 的标准 AI SDK 运行时，使供应商插件的 `auth.loader` 与 `fetch` 保持生效，不受首版 native runtime 的供应商范围限制。既有插件会照常执行，OpenCode 本身可能维护配置目录的依赖、缓存、日志或配置格式；桥接不改写供应商配置。
+两个模式均使用 OpenCode 的标准 AI SDK 运行时，使全局模式中供应商插件的 `auth.loader` 与 `fetch` 保持生效。既有插件会照常执行，OpenCode 本身可能维护配置目录的依赖、缓存、日志或配置格式；桥接不改写供应商配置。
 
 内置工具和其他 MCP 服务在这个 API worker 内禁用。客户端函数以 MCP 形式注册；调用时只返回“交由客户端执行”的内部确认，不执行函数。标准 SDK 完成整批调用后发布 `step-finish`。公开的消息 hook 阻止下一轮模型推理，网关据该事件返回工具调用并取消 worker；该内部确认不会发送给客户端，也不会被用于下一次供应商推理。下一次请求重新注入完整历史和客户端的真实结果。
 
@@ -113,9 +113,9 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 
 工具参数在完整解析后返回，不保留原始逐字 delta、JSON 空白或字段顺序。MCP 使用哈希工具名，外部恢复原名；schema 根级 `additionalProperties=true` 和 strict 模式被拒绝。developer 会转成 system，工具结果可能按原调用顺序归组。供应商的所有扩展字段和原始 HTTP 状态不保证透传。
 
-每次请求有启动开销，未实现 worker 池。超时包含初始化时间。固定 v1 版本是因为历史注入与事件转换依赖其公开实验 hooks；尚不接受任意 v1 或 v2。
+每次请求有启动开销，未实现 worker 池。超时包含初始化时间。启动检查会确认 HTTP 事件连接，并确认消息与参数 hooks 已执行；不检查版本白名单。`x-opencode-version` 响应头记录服务器实际报告的版本，未报告时省略。历史注入与事件转换仍依赖 OpenCode 的公开实验 hooks，因此不限制版本不等于已经验证所有版本。程序若不提供这些能力，将返回接口或 hook 兼容错误。
 
-接入不要求指定某家供应商。验收使用真实官方 v1、真实 Magpie/Bun 宿主，以及临时全局登录文件和本地模拟供应商；覆盖已存 API Key、自定义 OAuth 插件的 token 刷新、标准 SDK 的工具批次与结果续接。没有使用真实订阅账号做供应商联网验收，因此不能声称每个第三方认证插件或每个订阅套餐都已验证。目标账号首先须能在同一个全局 OpenCode 中正常推理。
+接入不要求指定某家供应商。自动验收使用真实官方 1.16.2 / 1.18.35、真实 Magpie/Bun 宿主，以及临时全局登录文件和本地模拟供应商；覆盖已存 API Key、自定义 OAuth 插件的 token 刷新、标准 SDK 的工具批次与结果续接。另外已在 Windows 上用现有全局 1.16.2 和真实自定义供应商完成普通回复、SSE 流式、工具调用、工具结果续接四项联网测试，全局供应商配置未变。发现的 Windows npm manifest UTF-8 BOM 解析问题已修复并加入回归测试。真实订阅账号、每个第三方认证插件和其他版本没有全部验证；目标账号首先须能在同一个全局 OpenCode 中正常推理。
 
 ## 独立服务
 
@@ -128,21 +128,21 @@ node package/bin/serve.mjs --config package/config.json --port 8787
 
 ## 保留首版隔离模式
 
-需要独立进程环境与明确配置的上游 API Key 时，使用 `config.isolated.example.json`，`mode: isolated`。该模式不会读取真实 OpenCode 的登录或配置，继续使用固定 v1 的 native runtime 与显式 `protocol/baseURL/id/apiKeyEnv`。旧的未填 mode 的配置仍按隔离模式处理。
+需要独立进程环境与明确配置的上游 API Key 时，使用 `config.isolated.example.json`，`mode: isolated`。该模式不会读取真实 OpenCode 的登录或配置，使用显式 `protocol/baseURL/id/apiKeyEnv`。旧的未填 mode 的配置仍按隔离模式处理。它同样没有版本限制；OpenCode 如需匹配自身版本的插件 SDK，会在临时环境中自行维护依赖。
 
 ## 开发验证
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund
 npm test
-TEST_OPENCODE_COMMAND='["/absolute/path/to/opencode-v1"]' npm run test:integration
+TEST_OPENCODE_COMMAND='["/absolute/path/to/opencode"]' npm run test:integration
 ```
 
 完整网关检查（仓库根目录）：
 
 ```sh
-TEST_OPENCODE_COMMAND='["/absolute/path/to/opencode-v1"]' \
+TEST_OPENCODE_COMMAND='["/absolute/path/to/opencode"]' \
   go test -tags nogui -count=1 -timeout 4m ./internal/gateway -run '^TestOpenCodeV1Bridge$'
 ```
 
-测试全部使用临时 HOME 和 loopback fixture，不接触真实登录。GitHub workflow 在 Windows/Linux 上运行新增测试、检查和构建；Linux 运行完整 nogui Go suite。
+测试全部使用临时 HOME 和 loopback fixture，不接触真实登录。GitHub workflow 在 Windows/Linux 上分别验证 1.16.2 和 1.18.35，构建两种平台产物；Linux 运行完整 nogui Go suite。测试其他版本时可用 `TEST_OPENCODE_PLUGIN_DIR` 指定测试安装中的真实 SDK 目录，`TEST_OPENCODE_VERSION` 用于核验版本响应头；这些变量没有运行版本白名单。

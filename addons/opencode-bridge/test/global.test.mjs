@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { OpenCodeBridge } from '../lib/bridge.mjs';
 import { nativeToolName, sseEvents } from '../lib/protocol.mjs';
 
-if (!process.env.TEST_OPENCODE_COMMAND) throw new Error('Set TEST_OPENCODE_COMMAND for the real v1 global-state test.');
+if (!process.env.TEST_OPENCODE_COMMAND) throw new Error('Set TEST_OPENCODE_COMMAND for the real OpenCode global-state test.');
 const command = JSON.parse(process.env.TEST_OPENCODE_COMMAND);
 const home = await mkdtemp(path.join(os.tmpdir(), 'opencode-global-fixture-'));
 const saved = { ...process.env };
@@ -50,7 +50,7 @@ after(async () => {
 await mkdir(data, { recursive: true });
 await mkdir(configDir, { recursive: true });
 // Seed only the fixture's global SDK installation. Real user files are untouched.
-const sdk = path.resolve(path.dirname(fileURLToPath(import.meta.resolve('@opencode-ai/plugin'))), '..');
+const sdk = process.env.TEST_OPENCODE_PLUGIN_DIR ?? path.resolve(path.dirname(fileURLToPath(import.meta.resolve('@opencode-ai/plugin'))), '..');
 const manifest = JSON.parse(await readFile(path.join(sdk, 'package.json'), 'utf8'));
 await cp(sdk, path.join(configDir, 'node_modules', '@opencode-ai', 'plugin'), { recursive: true });
 await writeFile(path.join(configDir, 'package.json'), JSON.stringify({ private: true, dependencies: { '@opencode-ai/plugin': manifest.version } }));
@@ -106,8 +106,12 @@ if (command.length === 1) {
     const root = path.resolve(path.dirname(command[0]), '..');
     const pkg = await readFile(path.join(root, 'package.json'), 'utf8').then(JSON.parse, () => undefined);
     if (pkg?.name === 'opencode-ai') {
-      await mkdir(path.join(bin, 'node_modules'));
-      await symlink(root, path.join(bin, 'node_modules', 'opencode-ai'), 'junction');
+      const shimPackage = path.join(bin, 'node_modules', 'opencode-ai');
+      await mkdir(shimPackage, { recursive: true });
+      await symlink(path.dirname(command[0]), path.join(shimPackage, 'bin'), 'junction');
+      // PowerShell-created global manifests may contain a UTF-8 BOM. Follow the
+      // package's declared bin without requiring a filename or runtime version.
+      await writeFile(path.join(shimPackage, 'package.json'), '\ufeff' + JSON.stringify({ name: 'opencode-ai', version: 'unlisted', bin: { opencode: './bin/' + path.basename(command[0]) } }));
       await writeFile(path.join(bin, 'opencode.cmd'), '@echo off\r\n"%~dp0node_modules\\opencode-ai\\bin\\opencode.exe" %*\r\n');
       fixtureCommand = undefined;
     } else {
@@ -133,6 +137,11 @@ test('real global v1 loads its configured OAuth plugin, refreshes its own login 
   const fetchOriginal = globalThis.fetch;
   let subscriptions = 0;
   globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/global/health')) {
+      const response = await fetchOriginal(url, init);
+      if (!response.ok) return response;
+      return Response.json({ ...await response.json(), version: 'unlisted-test-build' });
+    }
     if (String(url).endsWith('/event') && subscriptions++ === 0) {
       assert.equal(requests.length, 0, 'No inference until the event subscription works');
       return new Response('', { headers: { 'content-type': 'text/event-stream' } });
@@ -142,10 +151,12 @@ test('real global v1 loads its configured OAuth plugin, refreshes its own login 
   let response, chunks;
   try {
     response = await request({ messages: [{ role: 'system', content: 'Global system' }, { role: 'user', content: 'Hello' }], stream: true });
+    assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
     chunks = await Array.fromAsync(sseEvents(response.body));
   } finally { globalThis.fetch = fetchOriginal; }
   assert.ok(subscriptions >= 2, 'An empty event response is retried before inference');
   assert.equal(response.status, 200, JSON.stringify(chunks));
+  assert.equal(response.headers.get('x-opencode-version'), 'unlisted-test-build', 'An unknown reported version must not prevent inference');
   assert.equal(chunks.some(c => c.error), false, JSON.stringify(chunks));
   assert.equal(chunks.map(c => c.choices[0]?.delta.content ?? '').join(''), '复用全局 OpenCode 登录。');
   assert.equal(requests.length, 1);

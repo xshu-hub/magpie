@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { toNativeHistory } from './protocol.mjs';
 
 // This is loaded through OpenCode's public plugin config, without patching OpenCode.
@@ -35,7 +35,8 @@ export const BridgeWorker = async ({ directory }) => {
       output.system.splice(0, output.system.length, ...toNativeHistory(r.body, '', r.modelID, directory).system);
     },
     'chat.params': async (input, output) => {
-      const { body, outputLimit, global } = await get();
+      const { body, outputLimit, global, hookFile } = await get();
+      if (!injected) throw new Error('OpenCode did not invoke the required message transformation hook.');
       if (global && (input.model.providerID === 'opencode-bridge' || input.model.id.startsWith('opencode-bridge/'))) throw new Error('OpenCode points back to this bridge. Select an upstream model in OpenCode.');
       output.temperature = body.temperature;
       output.topP = body.top_p;
@@ -43,6 +44,7 @@ export const BridgeWorker = async ({ directory }) => {
       const requested = body.max_completion_tokens ?? body.max_tokens;
       if (requested !== undefined && input.model.limit.output > 0 && requested > input.model.limit.output) throw new Error('Requested output tokens exceed the OpenCode model limit.');
       output.maxOutputTokens = requested ?? Math.min(outputLimit, input.model.limit.output || outputLimit);
+      await writeFile(hookFile, JSON.stringify({ history: true, params: true }), { mode: 0o600 });
       // Provider defaults may still add vendor-specific options; request fields are never invented.
     },
   };
