@@ -134,7 +134,8 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 		})
 		write(filepath.Join(os.Getenv("XDG_DATA_HOME"), "opencode", "auth.json"), map[string]any{"fixture-global": map[string]string{"type": "api", "key": "fixture-key"}})
 		config["mode"] = "global"
-		config["models"] = map[string]any{"oc-mock": map[string]any{"context": 100000, "output": 1000}}
+		// No model aliases: the plugin must discover the real global provider.
+		delete(config, "models")
 	}
 	b, _ := json.Marshal(config)
 	// PowerShell can save JSON with a UTF-8 BOM; the installed plugin accepts it.
@@ -187,6 +188,9 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 	defer gw.Close()
 	ask := func(body string) (int, string) {
 		t.Helper()
+		if global {
+			body = strings.ReplaceAll(body, "opencode-bridge/oc-mock", "opencode-bridge/fixture-global/mock")
+		}
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, gw.URL+"/v1/chat/completions", strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer fixture-client")
 		req.Header.Set("Content-Type", "application/json")

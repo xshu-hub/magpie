@@ -8,6 +8,7 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, rm, symlink } from 'n
 import { setTimeout as delay } from 'node:timers/promises';
 import { OpenCodeBridge } from '../lib/bridge.mjs';
 import { nativeToolName, sseEvents } from '../lib/protocol.mjs';
+import { OpenCodeBridgePlugin } from '../index.mjs';
 
 if (!process.env.TEST_OPENCODE_COMMAND) throw new Error('Set TEST_OPENCODE_COMMAND for the real OpenCode global-state test.');
 const command = JSON.parse(process.env.TEST_OPENCODE_COMMAND);
@@ -201,4 +202,34 @@ test('explicit model selection still uses the global saved key and ignores a Mag
   assert.equal(response.status, 200, JSON.stringify(await response.json()));
   assert.equal(requests.at(-1).auth, 'Bearer fixture-saved-api-key');
   assert.equal(refreshes, 1, 'Refreshed credentials survive a new worker');
+});
+
+test('global model discovery lists connected providers and calls the selected model without copying credentials', { timeout: 60000 }, async () => {
+  const discovered = new OpenCodeBridge({ ...options, discoverModels: true });
+  const before = requests.length;
+  const listing = await discovered.fetch('http://bridge/v1/models');
+  const models = await listing.json();
+  assert.equal(listing.status, 200, JSON.stringify(models));
+  for (const id of ['oc-default', 'fixture-api/mock', 'fixture-oauth/mock']) assert.ok(models.data.some(m => m.id === id), id + ' must be selectable');
+  assert.equal(requests.length, before, 'Listing models must not initiate inference');
+  for (const value of Object.values(discovered.config.models)) assert.deepEqual(Object.keys(value).sort().filter(k => ['apiKey', 'baseURL', 'options', 'headers'].includes(k)), []);
+  const response = await discovered.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'fixture-api/mock', messages: [{ role: 'user', content: 'Hello' }] }) });
+  assert.equal(response.status, 200, JSON.stringify(await response.json()));
+  assert.equal(requests.length, before + 1);
+  assert.equal(requests.at(-1).auth, 'Bearer fixture-saved-api-key');
+  assert.equal(requests.at(-1).body.model, 'mock');
+});
+
+test('a plugin with no config.json uses global OpenCode and discovers its models', { timeout: 60000 }, async () => {
+  const configured = process.env.MAGPIE_OPENCODE_CONFIG;
+  delete process.env.MAGPIE_OPENCODE_CONFIG;
+  let plugin;
+  try { plugin = await OpenCodeBridgePlugin({}); }
+  finally { if (configured !== undefined) process.env.MAGPIE_OPENCODE_CONFIG = configured; }
+  const cfg = {};
+  await plugin.config(cfg);
+  assert.ok(cfg.provider['opencode-bridge'].models['fixture-api/mock']);
+  assert.ok(cfg.provider['opencode-bridge'].models['fixture-oauth/mock']);
+  assert.equal(plugin.auth.methods[0].type, 'oauth');
+  await assert.rejects(() => OpenCodeBridgePlugin({}, { configFile: path.join(home, 'missing-explicit-config.json') }), { code: 'ENOENT' });
 });

@@ -39,7 +39,8 @@ export function normalizeConfig(input, directory = process.cwd()) {
     }
     for (const key of ['context', 'output']) if (!Number.isInteger(model[key]) || model[key] <= 0) throw new ApiError('Each model needs positive integer context and output limits.', 500);
   }
-  const config = { ...input, mode, command: [...command], models, maxConcurrent: input.maxConcurrent ?? (mode === 'global' ? 1 : 2), timeoutMs: input.timeoutMs ?? 120000, startupTimeoutMs: input.startupTimeoutMs ?? 30000 };
+  const config = { ...input, mode, command: [...command], models, discoverModels: input.discoverModels ?? (mode === 'global' && input.models === undefined), maxConcurrent: input.maxConcurrent ?? (mode === 'global' ? 1 : 2), timeoutMs: input.timeoutMs ?? 120000, startupTimeoutMs: input.startupTimeoutMs ?? 30000 };
+  if (typeof config.discoverModels !== 'boolean' || (config.discoverModels && mode !== 'global')) throw new ApiError('discoverModels must be a boolean and is available only in global mode.', 500);
   for (const key of ['maxConcurrent', 'timeoutMs', 'startupTimeoutMs']) if (!Number.isInteger(config[key]) || config[key] <= 0) throw new ApiError(`${key} must be a positive integer.`, 500);
   if (mode === 'global' && config.maxConcurrent !== 1) throw new ApiError('Global mode requires maxConcurrent=1 because OpenCode shares its login and refresh state.', 500);
   return config;
@@ -154,6 +155,55 @@ async function freePort() {
   return port;
 }
 
+async function discoverGlobalModels(config) {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'magpie-oc-models-'));
+  let worker;
+  const signal = AbortSignal.timeout(config.startupTimeoutMs);
+  try {
+    const directory = path.join(home, 'workspace');
+    await mkdir(directory);
+    const command = await executableCommand(config.command);
+    const port = await freePort();
+    const password = randomBytes(24).toString('hex');
+    worker = start(command, ['serve', '--hostname', '127.0.0.1', '--port', String(port)], { env: { ...globalEnv(home), OPENCODE_SERVER_PASSWORD: password }, cwd: directory, signal });
+    const headers = { authorization: 'Basic ' + Buffer.from('opencode:' + password).toString('base64') };
+    const base = 'http://127.0.0.1:' + port;
+    while (true) {
+      signal.throwIfAborted();
+      if (worker.error || worker.child.exitCode !== null) throw new ApiError('OpenCode exited while discovering models.', 503, null, 'opencode_startup');
+      try {
+        const health = await fetch(base + '/global/health', { headers, signal: AbortSignal.any([signal, AbortSignal.timeout(1000)]) });
+        if (health.ok) break;
+      } catch { signal.throwIfAborted(); }
+      await delay(100, signal);
+    }
+    const response = await fetch(base + '/provider', { headers, signal });
+    if (!response.ok) throw new ApiError(`OpenCode model discovery returned HTTP ${response.status}.`, 503, null, 'opencode_models');
+    const catalog = await response.json();
+    if (!Array.isArray(catalog.all) || !Array.isArray(catalog.connected)) throw new ApiError('OpenCode did not return a compatible provider catalog.', 503, null, 'opencode_models');
+    const connected = new Set(catalog.connected);
+    const models = {};
+    const limit = (value, fallback) => Number.isInteger(value) && value > 0 ? value : fallback;
+    // Copy public model selection and limits only; no provider credentials,
+    // endpoints, options or headers become gateway metadata or bridge config.
+    for (const provider of catalog.all) {
+      if (!connected.has(provider.id) || provider.id === 'opencode-bridge') continue;
+      for (const [id, model] of Object.entries(provider.models ?? {})) {
+        const alias = provider.id + '/' + id;
+        if (!/^[^/\s]+\/\S+$/.test(alias) || model.capabilities?.output?.text === false || model.capabilities?.input?.text === false) continue;
+        models[alias] = { model: alias, name: model.name || id, context: limit(model.limit?.context, 128000), output: limit(model.limit?.output, 16384) };
+      }
+    }
+    return models;
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError('OpenCode model discovery failed or timed out. Check the global program and its provider catalog.', 503, null, 'opencode_models');
+  } finally {
+    await stop(worker);
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+}
+
 function mcpServer(body, token) {
   const server = http.createServer(async (req, res) => {
     try {
@@ -171,7 +221,7 @@ function mcpServer(body, token) {
       let result;
       switch (rpc.method) {
         case 'initialize':
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.3.0' } };
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.4.0' } };
           break;
         case 'ping': result = {}; break;
         case 'tools/list':
@@ -200,10 +250,19 @@ export class OpenCodeBridge {
     this.config = normalizeConfig(config);
     this.active = 0;
   }
+  async loadModels() {
+    if (!this.config.discoverModels) return this.config.models;
+    this.catalog ??= discoverGlobalModels(this.config).then(models => {
+      this.config.models = { ...models, ...this.config.models };
+      return this.config.models;
+    }).catch(error => { this.catalog = undefined; throw error; });
+    return this.catalog;
+  }
   models() {
     return { object: 'list', data: Object.keys(this.config.models).map(id => ({ id, object: 'model', created: 0, owned_by: 'opencode-bridge' })) };
   }
   async prepare(body, apiKey, signal) {
+    await this.loadModels();
     validateRequest(body, this.config.models);
     signal?.throwIfAborted();
     if (this.active >= this.config.maxConcurrent) throw new ApiError('All OpenCode workers are busy. Retry later.', 429, null, 'worker_busy');
@@ -355,7 +414,7 @@ export class OpenCodeBridge {
   async fetch(url, init = {}, apiKey) {
     try {
       const endpoint = new URL(url).pathname.replace(/\/$/, '');
-      if (endpoint === '/v1/models' && (!init.method || init.method === 'GET')) return Response.json(this.models());
+      if (endpoint === '/v1/models' && (!init.method || init.method === 'GET')) { await this.loadModels(); return Response.json(this.models()); }
       if (endpoint !== '/v1/chat/completions' || init.method !== 'POST') throw new ApiError('Only /v1/models and /v1/chat/completions are supported.', 404, null, 'unsupported_endpoint');
       let body;
       try { body = JSON.parse(init.body); } catch { throw new ApiError('Malformed JSON request.'); }

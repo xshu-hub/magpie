@@ -118,7 +118,9 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 	l := plugin.Load()
 	errs := map[string]string{}
 	names := map[string][]string{}
-	if len(l.Plugins) > 0 && (plugin.Running() || plugin.HasBun()) {
+	// Local folders do not download Bun during Add. Initialize their host here
+	// too, so the first page can list sign-in methods or explain a load failure.
+	if len(l.Plugins) > 0 {
 		loaded, err := plugin.Plugins(ctx)
 		if err != nil {
 			s.Error = err.Error()
@@ -131,6 +133,7 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 				names[p.Spec] = append(names[p.Spec], p.Name)
 			}
 		}
+		s.Bun, s.BunVer = plugin.HasBun(), plugin.BunInUse()
 	}
 	// npm's newest, as it said last: asking it again is /api/plugins/npm's
 	known := plugin.InfoCached(npmNames(l.Plugins))

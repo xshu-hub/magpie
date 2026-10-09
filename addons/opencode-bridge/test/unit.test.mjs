@@ -8,6 +8,9 @@ test('global mode needs no supplier configuration or upstream key and serializes
   const config = normalizeConfig({ mode: 'global' });
   assert.deepEqual(config.command, ['opencode']);
   assert.equal(config.maxConcurrent, 1);
+  assert.equal(config.discoverModels, true);
+  assert.equal(normalizeConfig({ mode: 'global', models: { selected: { model: 'provider/model', context: 1, output: 1 } } }).discoverModels, false);
+  assert.throws(() => normalizeConfig({ mode: 'global', discoverModels: 'yes' }), /discoverModels/);
   assert.deepEqual(Object.keys(config.models), ['oc-default']);
   assert.equal(config.models['oc-default'].model, undefined);
   assert.throws(() => normalizeConfig({ mode: 'global', maxConcurrent: 2 }), /shared|shares/);

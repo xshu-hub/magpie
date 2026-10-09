@@ -1,12 +1,12 @@
 # Magpie OpenCode bridge
 
-0.3.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号**。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
+0.4.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号**。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
 
 请求方向：客户端 → Magpie → 插件 → 全局 OpenCode → 它配置的上游。也可运行独立的 OpenAI Chat HTTP 服务。
 
 ## Windows 安装
 
-需要 Node.js 22+，以及在 PATH 上能够运行的 OpenCode。Magpie 首次启动插件时会下载自己的 Bun 宿主。
+需要在 PATH 上能够运行的 OpenCode。Magpie GUI 首次加载插件时会自动下载自己的 Bun 宿主；仅独立 Node 服务需要 Node.js 22+。
 
 先检查全局程序：
 
@@ -17,13 +17,14 @@ opencode models
 
 确认这个全局 OpenCode 自己已能使用目标账号和模型完成对话。本插件不登录或转移供应商账号，不替换全局安装，也不要求升级到指定版本。1.16.2 和 1.18.35 已纳入真实程序测试；其他版本照常尝试接入。兼容性取决于它实际提供的 HTTP API 和插件 hooks，接口缺失时会返回具体错误。
 
-下载构建 ZIP，解压到例如 `C:\Magpie-OpenCode`，在该目录执行：
+下载构建 ZIP，解压到例如 `C:\Magpie-OpenCode`，将其中的插件 `.tgz` 解压得到 `package` 文件夹。
+
+双击 `magpie-windows-amd64.exe`，在「插件 → 发现」下方选择该 `package` 文件夹并安装，再到「已安装」点击 OpenCode bridge 对应的「登录」启用桥接。无需创建 `config.json`、填写供应商地址或密钥，也无需安装插件的 npm 依赖。首次启动会从真实全局 OpenCode 自动读取模型列表。
+
+也可在解压目录用 CLI 安装：
 
 ```powershell
-tar -xzf xshu-hub-magpie-opencode-bridge-0.3.0.tgz
-npm install --prefix package --ignore-scripts --no-audit --no-fund
-Copy-Item .\package\config.example.json .\package\config.json
-
+tar -xzf xshu-hub-magpie-opencode-bridge-0.4.0.tgz
 .\magpie-cli-windows-amd64.exe plugin add .\package
 .\magpie-cli-windows-amd64.exe plugin login opencode-bridge
 .\magpie-cli-windows-amd64.exe serve
@@ -31,7 +32,7 @@ Copy-Item .\package\config.example.json .\package\config.json
 
 全局模式的 `plugin login` 只是启用桥接，不弹出供应商登录，也不询问上游 API Key。也可以使用已有 Magpie 的插件命令和桌面网关。
 
-默认配置已经足够：
+未提供 `config.json` 时默认使用全局模式并自动发现模型。文件仅用于高级覆盖，例如指定可执行文件、超时或模型别名；以下配置也是可选的：
 
 ```json
 {
@@ -55,7 +56,9 @@ Copy-Item .\package\config.example.json .\package\config.json
 | API Key | 默认本机模式可填 `magpie`；共享模式使用实际网关密钥 |
 | 模型 | `opencode-bridge/oc-default` |
 
-`oc-default` 使用 OpenCode 自己的默认模型选择逻辑，包含全局配置指定的模型。不枚举或代理所有供应商模型。需要客户端选择多个模型时，在桥接配置中增加别名；只指定 OpenCode 已有的模型名，不填上游地址和密钥：
+`oc-default` 使用 OpenCode 自己的默认模型选择逻辑。0.4.0 默认通过真实全局 OpenCode 的 `/provider` API 自动枚举已连接供应商的文本模型，客户端可直接选择 `opencode-bridge/provider/model`，例如 `opencode-bridge/xshu/gpt-6.1-sol`。OpenCode 报告为可用的免费模型也会列出。模型列表只复制名称、选择 ID 和 token 上限，不复制凭证、上游地址、请求头或供应商 options。
+
+每个插件宿主加载时读取一次模型列表，模型配置更新后重启 Magpie，或停用再启用插件重新加载。显式设置 `models` 时默认仅列出这些别名；设置 `discoverModels: true` 可同时加入自动发现的模型，`discoverModels: false` 可只保留默认别名。需要自定义别名时只指定 OpenCode 已有的模型名，不填上游地址和密钥：
 
 ```json
 {
@@ -99,7 +102,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 
 | 能力 | 当前行为 |
 | --- | --- |
-| `/v1/models`、`/v1/chat/completions` | 支持；模型列表是桥接别名 |
+| `/v1/models`、`/v1/chat/completions` | 支持；默认列出 OpenCode 已连接供应商的文本模型及 oc-default |
 | 文本、多轮角色历史、system/developer | 支持；system/developer 位于历史开头，按顺序合成系统提示 |
 | stream=true/false | 支持；成功 SSE 以 `[DONE]` 结束，失败发送 error 后关闭 |
 | tools、同轮多个调用、工具结果续接 | 支持普通 function 工具与文本结果；结果按 tool_call_id 匹配 |

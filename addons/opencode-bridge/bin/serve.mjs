@@ -18,7 +18,11 @@ if (args.includes('--help')) {
   process.exit(0);
 }
 const configFile = path.resolve(value('--config', 'config.json'));
-const config = normalizeConfig(JSON.parse((await readFile(configFile, 'utf8')).replace(/^\uFEFF/, '')), path.dirname(configFile));
+const content = await readFile(configFile, 'utf8').catch(error => {
+  if (error.code === 'ENOENT' && !args.includes('--config')) return '{"mode":"global"}';
+  throw error;
+});
+const config = normalizeConfig(JSON.parse(content.replace(/^\uFEFF/, '')), path.dirname(configFile));
 if (args.includes('--opencode')) config.command = [path.resolve(value('--opencode'))];
 const bridge = new OpenCodeBridge(config);
 const key = process.env.BRIDGE_API_KEY;

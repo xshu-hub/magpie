@@ -59,20 +59,24 @@ jobs:
           npm run test:integration --prefix addons/opencode-bridge
       - name: Real Magpie gateway and Bun plugin host with real OpenCode
         run: go test -tags nogui -count=1 -timeout 4m ./internal/gateway -run '^TestOpenCodeV1Bridge$'
+      - name: Cold GUI local-plugin initialization
+        run: go test -tags nogui -count=1 -timeout 2m ./internal/gui -run '^TestLocalPluginColdStartAttemptsHostInitialization$'
       - name: Verify Go and build Magpie
         if: matrix.opencode == '1.18.35'
         env:
           CGO_ENABLED: '0'
         run: |
           test -z "$(git show HEAD:internal/gateway/opencode_bridge_test.go | gofmt -d)"
+          test -z "$(git show HEAD:internal/gui/plugins.go | gofmt -d)"
+          test -z "$(git show HEAD:internal/gui/plugins_cold_test.go | gofmt -d)"
           go vet -tags nogui ./...
           mkdir -p artifacts
           if [ "$RUNNER_OS" = Windows ]; then
             go vet ./...
-            go build -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.3.0' -o artifacts/magpie-windows-amd64.exe .
-            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.3.0' -o artifacts/magpie-cli-windows-amd64.exe .
+            go build -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.4.0' -o artifacts/magpie-windows-amd64.exe .
+            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.4.0' -o artifacts/magpie-cli-windows-amd64.exe .
           else
-            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.3.0' -o artifacts/magpie-cli-linux-amd64 .
+            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.4.0' -o artifacts/magpie-cli-linux-amd64 .
           fi
       - name: Sandbox full terminal Go suite
         if: runner.os == 'Linux' && matrix.opencode == '1.18.35'

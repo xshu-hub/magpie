@@ -90,7 +90,13 @@ configuration, login and authentication plugins. OpenCode owns upstream calls
 and persists token refreshes in its genuine auth store; the bridge does not
 implement supplier authentication. API workspaces and session databases remain
 temporary. Global mode serializes requests sharing login state and uses the
-standard SDK runtime. MCP acknowledges client-tool deferral, allowing a complete
+standard SDK runtime. It reads the real OpenCode provider catalog to expose
+connected text models. With no addon
+config file, it selects global mode and the PATH executable automatically;
+explicit aliases remain supported and credential fields are never copied.
+The GUI initializes a local plugin's host even on a cold Bun cache, so sign-in
+methods are displayed instead of silently reporting that the plugin has none.
+MCP acknowledges client-tool deferral, allowing a complete
 model step to finish, while the public message hook gates further inference
 before the worker is aborted. Only clients execute their real functions, and
 the next request replays their actual results. Isolated mode uses explicit API
