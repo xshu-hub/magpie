@@ -83,6 +83,17 @@ The GUI's plugin integration includes `subOf`, `pluginSubs`, and `startPluginSig
 
 ## Verification
 
+The optional [OpenCode v1 bridge addon](../../addons/opencode-bridge/README.md)
+adds the independent `opencode-bridge` provider. Its fetch drives an isolated,
+unmodified official OpenCode 1.18.35 process, with a public message/parameter
+plugin and client tools registered through MCP. The native LLM configuration
+flag provides a model step boundary before parked client tool calls finish.
+Only the client executes those tools, and the next request replays their results.
+It uses explicitly configured upstream API keys, not subscription token emulation.
+`TestOpenCodeV1Bridge` in `internal/gateway/opencode_bridge_test.go` is an opt-in
+real gateway/host/binary check; the addon has Node protocol and real OpenCode tests.
+The addon README records the supported API subset and experimental-v1 constraints.
+
 [`migrate_notice_test.go`](../../internal/provider/migrate_notice_test.go) includes `TestMovedBuiltinsSayTheirPlugin`, which checks that moved built-ins tell contributors which plugin serves them. Migration tests live beside [`migrate.go`](../../internal/provider/migrate.go).
 
 Gateway parity tests in [`plugin_parity_test.go`](../../internal/gateway/plugin_parity_test.go) and other `plugin_*_test.go` files compare or exercise plugin paths. A built-in test alone does not establish moved-user behavior. Inspect each test's fixture to confirm that it covers the provider and operation being changed.

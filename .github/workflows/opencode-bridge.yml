@@ -1,0 +1,87 @@
+name: OpenCode v1 bridge build
+
+on:
+  push:
+    branches: [opencode-bridge]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opencode-bridge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bridge:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: windows-latest
+            platform: windows-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: addons/opencode-bridge/package-lock.json
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install pinned bridge dependencies and official OpenCode v1
+        run: |
+          npm ci --prefix addons/opencode-bridge --ignore-scripts --no-audit --no-fund
+          npm install --prefix bridge-runtime --no-audit --no-fund opencode-ai@1.18.35
+          node -e 'const fs=require("fs"),path=require("path"); const bin=path.resolve("bridge-runtime/node_modules/opencode-ai/bin/"+(process.platform==="win32"?"opencode.exe":"opencode")); fs.appendFileSync(process.env.GITHUB_ENV,"TEST_OPENCODE_COMMAND="+JSON.stringify([bin])+"\n")'
+      - name: Unit and real OpenCode tests
+        run: |
+          npm test --prefix addons/opencode-bridge
+          npm run test:integration --prefix addons/opencode-bridge
+      - name: Real Magpie gateway and Bun plugin host with real OpenCode v1
+        run: go test -tags nogui -count=1 -timeout 4m ./internal/gateway -run '^TestOpenCodeV1Bridge$'
+      - name: Verify Go and build Magpie
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          go vet -tags nogui ./...
+          mkdir -p artifacts
+          if [ "$RUNNER_OS" = Windows ]; then
+            go vet ./...
+            go build -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.1.0' -o artifacts/magpie-windows-amd64.exe .
+            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.1.0' -o artifacts/magpie-cli-windows-amd64.exe .
+          else
+            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.1.0' -o artifacts/magpie-cli-linux-amd64 .
+          fi
+      - name: Sandbox full terminal Go suite
+        if: runner.os == 'Linux'
+        run: |
+          verification_home=$(mktemp -d)
+          trap 'chmod -R u+w "$verification_home"; rm -rf "$verification_home"' EXIT
+          verification_gopath=$(go env GOPATH)
+          verification_modcache=$(go env GOMODCACHE)
+          verification_buildcache=$(go env GOCACHE)
+          HOME="$verification_home" GOPATH="$verification_gopath" GOMODCACHE="$verification_modcache" GOCACHE="$verification_buildcache" go test -tags nogui -timeout 20m ./...
+      - name: Package addon
+        run: |
+          npm pack ./addons/opencode-bridge --pack-destination artifacts
+          cp addons/opencode-bridge/README.md artifacts/OpenCode-bridge-README.md
+          cp addons/opencode-bridge/config.example.json artifacts/config.example.json
+          node -e 'const fs=require("fs"),crypto=require("crypto"),path=require("path"); const lines=fs.readdirSync("artifacts").map(n=>crypto.createHash("sha256").update(fs.readFileSync(path.join("artifacts",n))).digest("hex")+"  "+n); fs.writeFileSync("artifacts/SHA256SUMS",lines.join("\n")+"\n")'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: magpie-opencode-bridge-${{ matrix.platform }}
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error
