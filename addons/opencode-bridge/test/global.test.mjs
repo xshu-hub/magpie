@@ -20,6 +20,7 @@ const authFile = path.join(data, 'auth.json');
 const requests = [];
 let refreshes = 0;
 let parallelRequests;
+let pausedStream;
 const upstream = http.createServer(async (req, res) => {
   if (req.url === '/refresh') {
     refreshes++;
@@ -30,6 +31,11 @@ const upstream = http.createServer(async (req, res) => {
   let raw = ''; for await (const chunk of req) raw += chunk;
   const body = JSON.parse(raw);
   requests.push({ auth: req.headers.authorization, body });
+  if (body.messages.some(m => m.role === 'user' && m.content === 'EARLY_UPSTREAM_REJECTION')) {
+    res.writeHead(403, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Fixture provider rejected this request.', type: 'permission_error' } }));
+    return;
+  }
   const marker = body.messages.find(m => m.role === 'user' && typeof m.content === 'string' && parallelRequests?.has(m.content))?.content;
   if (marker) {
     const pending = parallelRequests.get(marker);
@@ -42,6 +48,13 @@ const upstream = http.createServer(async (req, res) => {
   if (body.tools?.length && !body.messages.some(m => m.role === 'tool')) {
     for (const [i, name] of ['weather', 'clock'].entries()) emit({ tool_calls: [{ index: i, id: 'call_' + name, type: 'function', function: { name: nativeToolName(name), arguments: '{"city":"北京"}' } }] });
     emit({}, 'tool_calls', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  } else if (body.messages.some(m => m.role === 'user' && m.content === 'HOLD_AFTER_FIRST_OUTPUT')) {
+    emit({ role: 'assistant', content: 'First streamed text.' });
+    pausedStream.started.resolve();
+    await pausedStream.release.promise;
+    if (res.destroyed) return;
+    pausedStream.finished = true;
+    emit({}, 'stop', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
   } else if (marker) {
     emit({ role: 'assistant', content: marker });
     emit({}, 'stop', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
@@ -215,6 +228,40 @@ test('explicit model selection still uses the global saved key and ignores a Mag
   assert.equal(refreshes, 1, 'Refreshed credentials survive a new worker');
 });
 
+test('upstream rejection before any output returns an HTTP error instead of a successful empty SSE stream', { timeout: 60000 }, async () => {
+  const before = requests.length;
+  const instance = new OpenCodeBridge({ ...options, onFailure: undefined });
+  const response = await request({ messages: [{ role: 'user', content: 'EARLY_UPSTREAM_REJECTION' }], stream: true }, instance);
+  const result = await response.json();
+  assert.equal(response.status, 502, JSON.stringify(result));
+  assert.match(response.headers.get('content-type'), /^application\/json/);
+  assert.equal(result.error.message, 'Fixture provider rejected this request.');
+  assert.ok(['opencode_session_error', 'opencode_inference_error'].includes(result.error.code));
+  assert.equal(requests.length, before + 1, 'A provider rejection is not retried as another model call');
+  assert.equal(instance.active, 0, 'Rejected requests release their worker');
+});
+
+test('successful SSE starts at the first model output without waiting for completion', { timeout: 60000 }, async () => {
+  const instance = new OpenCodeBridge({ ...options, onFailure: undefined });
+  pausedStream = { started: Promise.withResolvers(), release: Promise.withResolvers(), finished: false };
+  let events;
+  try {
+    const responsePromise = request({ messages: [{ role: 'user', content: 'HOLD_AFTER_FIRST_OUTPUT' }], stream: true, stream_options: { include_usage: true } }, instance);
+    await Promise.race([pausedStream.started.promise, delay(15000).then(() => { throw new Error('Upstream did not start'); })]);
+    const response = await Promise.race([responsePromise, delay(5000).then(() => { throw new Error('Response buffered until completion'); })]);
+    assert.equal(response.status, 200);
+    events = sseEvents(response.body);
+    assert.equal((await events.next()).value.choices[0].delta.role, 'assistant');
+    assert.equal((await events.next()).value.choices[0].delta.content, 'First streamed text.');
+    assert.equal(pausedStream.finished, false, 'Text reaches the client while inference is still running');
+    pausedStream.release.resolve();
+    const rest = await Array.fromAsync(events);
+    assert.equal(rest.find(c => c.choices[0]?.finish_reason)?.choices[0].finish_reason, 'stop');
+    assert.equal(rest.at(-1).usage.total_tokens, 15);
+    assert.equal(instance.active, 0);
+  } finally { pausedStream.release.resolve(); await events?.return(); }
+});
+
 test('Cherry Studio multi-turn history with empty, null or nonempty reasoning goes through real global OpenCode', { timeout: 120000 }, async () => {
   for (const reasoning_content of ['', null, 'GLOBAL_PRIOR_REASONING_SENTINEL']) {
     const before = requests.length;
@@ -277,6 +324,11 @@ test('global workers infer concurrently and cancelling one does not cancel the o
   const jobs = labels.map(async (label, i) => {
     const body = { model: i % 2 ? 'saved-api' : 'oc-default', messages: [{ role: 'user', content: label }], stream: i % 2 === 0, stream_options: { include_usage: true } };
     const response = await instance.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify(body), signal: controllers[i].signal }, 'not-the-upstream-key');
+    if (i === 0 && controllers[0].signal.aborted) {
+      assert.equal(response.status, 499, 'Cancellation before first model output is an HTTP error');
+      assert.ok((await response.json()).error);
+      return { cancelled: true };
+    }
     assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
     if (!body.stream) {
       const result = await response.json();

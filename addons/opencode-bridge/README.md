@@ -1,6 +1,6 @@
 # Magpie OpenCode bridge
 
-0.6.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号和并发请求数**。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
+0.7.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号和并发请求数**。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
 
 请求方向：客户端 → Magpie → 插件 → 全局 OpenCode → 它配置的上游。也可运行独立的 OpenAI Chat HTTP 服务。
 
@@ -24,7 +24,7 @@ opencode models
 也可在解压目录用 CLI 安装：
 
 ```powershell
-tar -xzf xshu-hub-magpie-opencode-bridge-0.6.0.tgz
+tar -xzf xshu-hub-magpie-opencode-bridge-0.7.0.tgz
 .\magpie-cli-windows-amd64.exe plugin add .\package
 .\magpie-cli-windows-amd64.exe plugin login opencode-bridge
 .\magpie-cli-windows-amd64.exe serve
@@ -107,7 +107,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 | `/v1/models`、`/v1/chat/completions` | 支持；默认列出 OpenCode 已连接供应商的文本模型及 oc-default |
 | 文本、多轮角色历史、system/developer | 支持；system/developer 位于历史开头，按顺序合成系统提示 |
 | assistant.reasoning_content 历史 | 接受字符串、空字符串和 null；非空思考内容作为独立 OpenCode reasoning part 回放，不混入可见正文 |
-| stream=true/false | 支持；成功 SSE 以 `[DONE]` 结束，失败发送 error 后关闭 |
+| stream=true/false | 支持；首个模型输出前的失败返回 HTTP JSON 错误，输出后的失败发送 SSE error 后关闭；成功以 `[DONE]` 结束 |
 | tools、同轮多个调用、工具结果续接 | 支持普通 function 工具与文本结果；结果按 tool_call_id 匹配 |
 | temperature、top_p、max_tokens/max_completion_tokens | 通过 OpenCode 参数 hook 设置；最终接受范围由实际模型决定 |
 | stream_options.include_usage | 支持；计数来自 OpenCode |
@@ -120,6 +120,10 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 工具参数在完整解析后返回，不保留原始逐字 delta、JSON 空白或字段顺序。MCP 使用哈希工具名，外部恢复原名；schema 根级 `additionalProperties=true` 和 strict 模式被拒绝。developer 会转成 system，工具结果可能按原调用顺序归组。供应商的所有扩展字段和原始 HTTP 状态不保证透传。
 
 Cherry Studio 2.0.14 会在历史 assistant 消息中附带 `reasoning_content: ""`，0.6.0 起可以直接继续多轮对话。非空值由 OpenCode 的原生 reasoning part 交给供应商 SDK 处理；带签名的思考历史等供应商私有结构仍不属于本桥接的兼容保证。其他不支持的消息字段会在错误中标出具体字段名与路径。
+
+0.7.0 在首个实际文本、思考、工具调用或完成事件到达后才提交成功 SSE 响应，避免提前发送空 assistant role 把上游拒绝变成 HTTP 200。只暂存首个事件，后续内容仍逐块转发；首个输出前取消返回 499。此变化修正错误呈现，不改变供应商的访问权限。
+
+OpenCode Zen 免费模型存在额外使用检查，模型被枚举出来不表示网关请求一定获准。2026-10-09 在同一个全局 OpenCode 1.18.0 中实测：Muse Spark 1.3 Free 通过默认 `opencode run` 成功；仅配置 `permission: { "*": "deny" }` 即返回 `OpenCode's free tier can only be used from within OpenCode`。桥接为让客户端执行 function 工具，禁用 OpenCode 内置本地工具并替换其代理提示，因此该模型目前不能按本桥接的普通 Chat API 行为使用。仅升级版本不能解决这个差异；服务端具体检查规则未公开，不保证其他免费模型行为相同。
 
 每次请求有启动开销，未实现 worker 池。超时包含初始化时间。启动检查会确认 HTTP 事件连接，并确认消息与参数 hooks 已执行；不检查版本白名单。`x-opencode-version` 响应头记录服务器实际报告的版本，未报告时省略。历史注入与事件转换仍依赖 OpenCode 的公开实验 hooks，因此不限制版本不等于已经验证所有版本。程序若不提供这些能力，将返回接口或 hook 兼容错误。
 

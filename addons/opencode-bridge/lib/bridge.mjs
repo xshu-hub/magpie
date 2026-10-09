@@ -221,7 +221,7 @@ function mcpServer(body, token) {
       let result;
       switch (rpc.method) {
         case 'initialize':
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.6.0' } };
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.7.0' } };
           break;
         case 'ping': result = {}; break;
         case 'tools/list':
@@ -437,20 +437,40 @@ export class OpenCodeBridge {
         const message = { role: 'assistant', content: content || null, ...(calls.length ? { tool_calls: calls } : {}), ...(reasoning ? { reasoning_content: reasoning } : {}) };
         return Response.json({ id, object: 'chat.completion', created, model: body.model, choices: [{ index: 0, message, finish_reason: finish, logprobs: null }], usage }, { headers: run.version ? { 'x-opencode-version': run.version } : {} });
       }
+      // Wait for the first model event before committing a successful SSE response.
+      // The initial assistant role alone does not establish successful inference:
+      // an upstream rejection must still become a normal HTTP error for clients.
+      const role = await chunks.next();
+      const first = await chunks.next();
+      const streamChunks = (async function* () {
+        try {
+          if (!role.done) yield role.value;
+          if (!first.done) yield first.value;
+          yield* chunks;
+        } finally { await chunks.return(); }
+      })();
       const encoder = new TextEncoder();
+      let cancelled = false;
       const stream = new ReadableStream({
         async pull(controller) {
           try {
-            const next = await chunks.next();
+            const next = await streamChunks.next();
+            if (cancelled) return;
             if (next.done) { controller.enqueue(encoder.encode('data: [DONE]\n\n')); controller.close(); }
             else controller.enqueue(encoder.encode('data: ' + JSON.stringify(next.value) + '\n\n'));
           } catch (e) {
+            if (cancelled) return;
             const error = e instanceof ApiError ? e : new ApiError('OpenCode stream failed.', 502, null, 'opencode_stream_error');
             controller.enqueue(encoder.encode('data: ' + JSON.stringify(error.body()) + '\n\n'));
             controller.close();
           }
         },
-        async cancel() { await run.cleanup(); await chunks.return(); },
+        async cancel() {
+          cancelled = true;
+          await run.cleanup();
+          try { await streamChunks.return(); }
+          catch (error) { if (error.name !== 'AbortError' && !run.signal.aborted) throw error; }
+        },
       });
       return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', ...(run.version ? { 'x-opencode-version': run.version } : {}) } });
     } catch (e) {
