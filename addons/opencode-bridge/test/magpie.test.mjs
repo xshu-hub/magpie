@@ -58,7 +58,9 @@ test('packaged addon on official Magpie supports cwd, tools, SSE and independent
     const hash = async file => createHash('sha256').update(await readFile(file)).digest('hex');
     assert.equal(await hash(executable), await hash(official[0]), 'The official binary must be byte-for-byte unmodified');
     await writeFile(path.join(profile, '.portable'), '');
-    const unpack = spawnSync('tar', ['-xzf', path.resolve(process.env.TEST_BRIDGE_PACKAGE), '-C', profile], { windowsHide: true, encoding: 'utf8' });
+    // GNU tar in Git Bash treats a Windows drive prefix as a remote hostname.
+    await copyFile(path.resolve(process.env.TEST_BRIDGE_PACKAGE), path.join(profile, 'addon.tgz'));
+    const unpack = spawnSync('tar', ['-xzf', 'addon.tgz'], { cwd: profile, windowsHide: true, encoding: 'utf8' });
     assert.equal(unpack.status, 0, unpack.stderr);
     const addon = path.join(profile, 'package');
     const pkg = JSON.parse(await readFile(path.join(addon, 'package.json'), 'utf8'));
