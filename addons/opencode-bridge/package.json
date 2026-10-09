@@ -29,7 +29,8 @@
   ],
   "scripts": {
     "test": "node --test test/unit.test.mjs test/command.test.mjs",
-    "test:integration": "node --test --test-concurrency=1 test/integration.test.mjs test/global.test.mjs"
+    "test:integration": "node --test --test-concurrency=1 test/integration.test.mjs test/global.test.mjs",
+    "test:magpie": "node --test test/magpie.test.mjs"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.18.35"

@@ -17,20 +17,20 @@ opencode models
 
 确认这个全局 OpenCode 自己已能使用目标账号和模型完成对话。本插件不登录或转移供应商账号，不替换全局安装，也不要求升级到指定版本。1.16.2 和 1.18.35 已纳入真实程序测试；其他版本照常尝试接入。兼容性取决于它实际提供的 HTTP API 和插件 hooks，接口缺失时会返回具体错误。
 
-下载构建 ZIP，解压到例如 `C:\Magpie-OpenCode`，将其中的插件 `.tgz` 解压得到 `package` 文件夹。
+下载插件 `.tgz`，解压到例如 `C:\Magpie-OpenCode`，得到 `package` 文件夹。构建产物只包含插件和说明文件，不包含 Magpie EXE；使用已有的 Magpie。
 
-双击 `magpie-windows-amd64.exe`，在「插件 → 发现」下方选择该 `package` 文件夹并安装，再到「已安装」点击 OpenCode bridge 对应的「登录」启用桥接。无需创建 `config.json`、填写供应商地址或密钥，也无需安装插件的 npm 依赖。首次启动会从真实全局 OpenCode 自动读取模型列表。
+打开已有 Magpie，在「插件 → 发现」下方选择该 `package` 文件夹并安装，再到「已安装」点击 OpenCode bridge 对应的「登录」启用桥接。无需创建 `config.json`、填写供应商地址或密钥，也无需安装插件的 npm 依赖。首次启动会从真实全局 OpenCode 自动读取模型列表。
 
-也可在解压目录用 CLI 安装：
+也可在解压目录用已有 CLI 安装（`magpie` 替换为本机 CLI 的实际命令或 EXE 路径）：
 
 ```powershell
 tar -xzf xshu-hub-magpie-opencode-bridge-0.9.0.tgz
-.\magpie-cli-windows-amd64.exe plugin add .\package
-.\magpie-cli-windows-amd64.exe plugin login opencode-bridge
-.\magpie-cli-windows-amd64.exe serve
+magpie plugin add .\package
+magpie plugin login opencode-bridge
+magpie serve
 ```
 
-全局模式的 `plugin login` 只是启用桥接，不弹出供应商登录，也不询问上游 API Key。也可以使用已有 Magpie 的插件命令和桌面网关。
+全局模式的 `plugin login` 只是启用桥接，不弹出供应商登录，也不询问上游 API Key。也可以使用已有 Magpie 的桌面网关。插件使用现有供应商插件接口，无需替换 Magpie 本体。旧版 GUI 的本地插件冷启动可能不显示登录按钮，此时用同一 Magpie 配置下的 CLI 执行 `plugin login opencode-bridge` 初始化宿主并启用插件。
 
 未提供 `config.json` 时默认使用全局模式并自动发现模型。文件仅用于高级覆盖，例如指定可执行文件、超时或模型别名；以下配置也是可选的：
 
@@ -175,4 +175,6 @@ TEST_OPENCODE_COMMAND='["/absolute/path/to/opencode"]' \
   go test -tags nogui -count=1 -timeout 4m ./internal/gateway -run '^TestOpenCodeV1Bridge$'
 ```
 
-测试全部使用临时 HOME 和 loopback fixture，不接触真实登录。并发测试让四个真实 OpenCode worker 在同一个指定 cwd 下的上游请求同时保持活动，验证混合流式/非流式结果隔离、独立数据库、复用登录和独立取消。目录测试覆盖带中文及空格的路径、相对配置路径、模型发现与推理的实际 cwd、错误目录、项目配置仍关闭、默认临时目录清理以及指定目录的现有文件保留。GitHub workflow 在 Windows/Linux 上分别验证 1.16.2 和 1.18.35，构建两种平台产物；Linux 运行完整 nogui Go suite。测试其他版本时可用 `TEST_OPENCODE_PLUGIN_DIR` 指定测试安装中的真实 SDK 目录，`TEST_OPENCODE_VERSION` 用于核验版本响应头；这些变量没有运行版本白名单。
+测试全部使用临时 HOME 和 loopback fixture，不接触真实登录。并发测试让四个真实 OpenCode worker 在同一个指定 cwd 下的上游请求同时保持活动，验证混合流式/非流式结果隔离、独立数据库、复用登录和独立取消。目录测试覆盖带中文及空格的路径、相对配置路径、模型发现与推理的实际 cwd、错误目录、项目配置仍关闭、默认临时目录清理以及指定目录的现有文件保留。
+
+GitHub workflow 在 Windows/Linux 上分别验证 OpenCode 1.16.2 和 1.18.35，并把已打包的插件安装到 SHA256 核验过的官方 Magpie CLI 0.1.1141 中，检查自动模型发现、普通回复、SSE、工具结果续接和四请求同目录并发。该流程只打包一份两种平台通用的插件，不编译或交付 Magpie。官方 EXE 仅下载用于测试，保持原始字节。测试其他版本时可用 `TEST_OPENCODE_PLUGIN_DIR` 指定测试安装中的真实 SDK 目录，`TEST_OPENCODE_VERSION` 用于核验版本响应头；这些变量没有运行版本白名单。单独运行原版 Magpie 验证时，需要设置 `TEST_MAGPIE_COMMAND`（JSON 可执行文件数组）、`TEST_BRIDGE_PACKAGE`（已打包 tgz 路径）以及上述 OpenCode 变量，再运行 `npm run test:magpie`。GUI 点击安装流程没有纳入该 CLI 验收。

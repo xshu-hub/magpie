@@ -1,4 +1,4 @@
-name: OpenCode bridge build and compatibility
+name: OpenCode bridge plugin build and compatibility
 
 on:
   push:
@@ -31,7 +31,7 @@ jobs:
             platform: windows-x64
             opencode: 1.16.2
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 15
     defaults:
       run:
         shell: bash
@@ -45,9 +45,6 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
       - name: Install bridge dependencies and the compatibility-test runtime
         run: |
           npm ci --prefix addons/opencode-bridge --ignore-scripts --no-audit --no-fund
@@ -57,48 +54,44 @@ jobs:
         run: |
           npm test --prefix addons/opencode-bridge
           npm run test:integration --prefix addons/opencode-bridge
-      - name: Real Magpie gateway and Bun plugin host with real OpenCode
-        run: go test -tags nogui -count=1 -timeout 4m ./internal/gateway -run '^TestOpenCodeV1Bridge$'
-      - name: Cold GUI local-plugin initialization
-        run: go test -tags nogui -count=1 -timeout 2m ./internal/gui -run '^TestLocalPluginColdStartAttemptsHostInitialization$'
-      - name: Verify Go and build Magpie
-        if: matrix.opencode == '1.18.35'
-        env:
-          CGO_ENABLED: '0'
+      - name: Pack the addon
         run: |
-          test -z "$(git show HEAD:internal/gateway/opencode_bridge_test.go | gofmt -d)"
-          test -z "$(git show HEAD:internal/gui/plugins.go | gofmt -d)"
-          test -z "$(git show HEAD:internal/gui/plugins_cold_test.go | gofmt -d)"
-          go vet -tags nogui ./...
-          mkdir -p artifacts
-          if [ "$RUNNER_OS" = Windows ]; then
-            go vet ./...
-            go build -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.9.0' -o artifacts/magpie-windows-amd64.exe .
-            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.9.0' -o artifacts/magpie-cli-windows-amd64.exe .
-          else
-            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.9.0' -o artifacts/magpie-cli-linux-amd64 .
-          fi
-      - name: Sandbox full terminal Go suite
+          mkdir -p bridge-package
+          npm pack ./addons/opencode-bridge --ignore-scripts --pack-destination bridge-package
+          node -e 'const fs=require("fs"),path=require("path"); const name=fs.readdirSync("bridge-package").find(n=>n.endsWith(".tgz")); fs.appendFileSync(process.env.GITHUB_ENV,"TEST_BRIDGE_PACKAGE="+path.resolve("bridge-package",name)+"\n")'
+      - name: Download the unmodified official Magpie CLI for compatibility testing
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import crypto from 'node:crypto';
+          const windows = process.platform === 'win32';
+          const name = windows ? 'magpie-cli-windows-amd64.exe' : 'magpie-cli-linux-amd64';
+          const expected = windows ? '130d1e76ba4e0857a2d462255d4234208aae10aa77e7d6b2fd9a8431500dc9e1' : '90035828b08f4bffeadcf3a9860582491e47031cae11dfcb395dd8c72f132efd';
+          const response = await fetch('https://github.com/yetone/magpie-releases/releases/download/v0.1.1141/' + name);
+          if (!response.ok) throw new Error('Official Magpie download failed: HTTP ' + response.status);
+          const bytes = Buffer.from(await response.arrayBuffer());
+          if (crypto.createHash('sha256').update(bytes).digest('hex') !== expected) throw new Error('Official Magpie SHA256 mismatch');
+          fs.mkdirSync('bridge-official', { recursive: true });
+          const file = path.resolve('bridge-official', name);
+          fs.writeFileSync(file, bytes, { mode: 0o755 });
+          fs.appendFileSync(process.env.GITHUB_ENV, 'TEST_MAGPIE_COMMAND=' + JSON.stringify([file]) + '\n');
+          NODE
+      - name: Packaged addon on official Magpie and real OpenCode
+        run: npm run test:magpie --prefix addons/opencode-bridge
+      - name: Prepare plugin-only artifact
         if: runner.os == 'Linux' && matrix.opencode == '1.18.35'
         run: |
-          verification_home=$(mktemp -d)
-          trap 'chmod -R u+w "$verification_home"; rm -rf "$verification_home"' EXIT
-          verification_gopath=$(go env GOPATH)
-          verification_modcache=$(go env GOMODCACHE)
-          verification_buildcache=$(go env GOCACHE)
-          HOME="$verification_home" GOPATH="$verification_gopath" GOMODCACHE="$verification_modcache" GOCACHE="$verification_buildcache" go test -tags nogui -timeout 20m ./...
-      - name: Package addon
-        if: matrix.opencode == '1.18.35'
-        run: |
-          npm pack ./addons/opencode-bridge --pack-destination artifacts
+          mkdir -p artifacts
+          cp bridge-package/*.tgz artifacts/
           cp addons/opencode-bridge/README.md artifacts/OpenCode-bridge-README.md
           cp addons/opencode-bridge/config.example.json artifacts/config.example.json
           cp addons/opencode-bridge/config.isolated.example.json artifacts/config.isolated.example.json
           node -e 'const fs=require("fs"),crypto=require("crypto"),path=require("path"); const lines=fs.readdirSync("artifacts").map(n=>crypto.createHash("sha256").update(fs.readFileSync(path.join("artifacts",n))).digest("hex")+"  "+n); fs.writeFileSync("artifacts/SHA256SUMS",lines.join("\n")+"\n")'
       - uses: actions/upload-artifact@v4
-        if: matrix.opencode == '1.18.35'
+        if: runner.os == 'Linux' && matrix.opencode == '1.18.35'
         with:
-          name: magpie-opencode-bridge-${{ matrix.platform }}
+          name: magpie-opencode-bridge-plugin
           path: artifacts/
           retention-days: 30
           if-no-files-found: error

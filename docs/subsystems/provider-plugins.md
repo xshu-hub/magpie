@@ -120,7 +120,10 @@ the next request replays their actual results. Isolated mode uses explicit API
 keys and the same standard runtime. Startup confirms the required HTTP APIs and
 message/parameter hooks without a version allowlist. Actual health metadata is
 reported in the version header when available. CI exercises official 1.16.2 and
-1.18.35 on Windows and Linux; other runtimes are attempted by their capabilities.
+1.18.35 on Windows and Linux, then installs the packed addon into SHA256-verified
+official Magpie CLI 0.1.1141 for the full transport check. The workflow packages
+only the platform-independent addon; it downloads Magpie for tests without
+building or shipping it. Other runtimes are attempted by their capabilities.
 `TestOpenCodeV1Bridge` in `internal/gateway/opencode_bridge_test.go` is an opt-in
 real gateway/host/binary check; the addon has Node protocol and real OpenCode tests.
 Assistant history accepts string or null `reasoning_content`, including the
