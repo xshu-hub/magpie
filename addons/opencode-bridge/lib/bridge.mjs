@@ -221,7 +221,14 @@ export class OpenCodeBridge {
       while (true) {
         combined.throwIfAborted();
         if (worker.error || worker.child.exitCode !== null) throw new ApiError('OpenCode server exited during startup.', 503, null, 'opencode_startup');
-        try { await api('/global/health'); break; } catch {
+        // A connection accepted while v1 attaches its HTTP handlers can remain unanswered.
+        // Bound each probe so that an early connection cannot consume the request's whole timeout.
+        try {
+          const health = await api('/global/health', undefined, AbortSignal.any([combined, AbortSignal.timeout(1000)]));
+          if (health.version !== OPENCODE_VERSION) throw new ApiError('OpenCode server version differs from the pinned v1 executable.', 503, null, 'opencode_version');
+          break;
+        } catch (error) {
+          if (error instanceof ApiError && error.code === 'opencode_version') throw error;
           if (Date.now() >= deadline) throw new ApiError('OpenCode server startup timed out.', 503, null, 'opencode_startup');
           await delay(100, combined);
         }
