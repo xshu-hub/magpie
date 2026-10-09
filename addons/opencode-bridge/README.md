@@ -20,7 +20,7 @@ npm install --prefix runtime --no-audit --no-fund opencode-ai@1.18.35
 
 复制 `package/config.example.json` 到 `package/config.json`，修改：
 
-- `command`：**绝对路径**的 v1 命令数组。Windows 是 `runtime/node_modules/opencode-ai/bin/opencode.exe`；Linux/macOS 是 `runtime/node_modules/opencode-ai/bin/opencode`。Linux/macOS 的 npm launcher 需要 Node 在 PATH。
+- `command`：**绝对路径**的 v1 命令数组。这个固定 npm 版本的 `package.json.bin.opencode` 是 `./bin/opencode.exe`，包括 Linux/macOS；后缀不决定二进制平台。实际路径为 `runtime/node_modules/opencode-ai/bin/opencode.exe`，安装程序会放入对应平台的原生二进制。以安装包的 bin 字段为准，不要调用已有的全局 v2。
 - `models`：客户端可用的模型别名；`id` 是上游真实模型名。
 - `protocol`：`openai-chat`、`openai-responses` 或 `anthropic`。目前自动端到端验收覆盖 `openai-chat`；其他两种是 OpenCode 原生适配路径，尚未用真实供应商验收。
 - `baseURL`：供应商 API 基址，不能指回使用这个插件的 Magpie，避免递归。

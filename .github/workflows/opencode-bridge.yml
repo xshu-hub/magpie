@@ -44,7 +44,7 @@ jobs:
         run: |
           npm ci --prefix addons/opencode-bridge --ignore-scripts --no-audit --no-fund
           npm install --prefix bridge-runtime --no-audit --no-fund opencode-ai@1.18.35
-          node -e 'const fs=require("fs"),path=require("path"); const bin=path.resolve("bridge-runtime/node_modules/opencode-ai/bin/"+(process.platform==="win32"?"opencode.exe":"opencode")); fs.appendFileSync(process.env.GITHUB_ENV,"TEST_OPENCODE_COMMAND="+JSON.stringify([bin])+"\n")'
+          node -e 'const fs=require("fs"),path=require("path"); const root=path.resolve("bridge-runtime/node_modules/opencode-ai"),pkg=require(path.join(root,"package.json")); const bin=path.resolve(root,typeof pkg.bin==="string"?pkg.bin:pkg.bin.opencode); fs.appendFileSync(process.env.GITHUB_ENV,"TEST_OPENCODE_COMMAND="+JSON.stringify([bin])+"\n")'
       - name: Unit and real OpenCode tests
         run: |
           npm test --prefix addons/opencode-bridge
