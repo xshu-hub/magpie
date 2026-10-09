@@ -12,6 +12,7 @@ export class ApiError extends Error {
 
 const fail = (message, param) => { throw new ApiError(message, 400, param); };
 const object = (v) => v && typeof v === 'object' && !Array.isArray(v);
+export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 export const toolName = (name) => 't_' + createHash('sha256').update(name).digest('hex').slice(0, 24);
 export const nativeToolName = (name) => 'bridge_' + toolName(name);
 
@@ -24,9 +25,10 @@ export function textContent(content, param, nullable = false) {
 
 export function validateRequest(body, models) {
   if (!object(body)) fail('Request must be a JSON object.', null);
-  const fields = new Set(['model', 'messages', 'stream', 'stream_options', 'tools', 'tool_choice', 'parallel_tool_calls', 'temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'n']);
+  const fields = new Set(['model', 'messages', 'stream', 'stream_options', 'tools', 'tool_choice', 'parallel_tool_calls', 'temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'reasoning_effort', 'n']);
   for (const key of Object.keys(body)) if (!fields.has(key)) fail(`Unsupported parameter: ${key}.`, key);
   if (typeof body.model !== 'string' || !Object.hasOwn(models, body.model)) throw new ApiError('Unknown bridge model.', 404, 'model', 'model_not_found');
+  if (body.reasoning_effort !== undefined && !REASONING_EFFORTS.includes(body.reasoning_effort)) fail('reasoning_effort must be none, minimal, low, medium, high, xhigh or max.', 'reasoning_effort');
   if (body.stream !== undefined && typeof body.stream !== 'boolean') fail('stream must be boolean.', 'stream');
   if (body.stream_options !== undefined) {
     if (!object(body.stream_options) || Object.keys(body.stream_options).some(k => k !== 'include_usage') || (body.stream_options.include_usage !== undefined && typeof body.stream_options.include_usage !== 'boolean')) fail('Only stream_options.include_usage is supported.', 'stream_options');

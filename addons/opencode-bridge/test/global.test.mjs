@@ -33,7 +33,18 @@ const upstream = http.createServer(async (req, res) => {
   }
   let raw = ''; for await (const chunk of req) raw += chunk;
   const body = JSON.parse(raw);
-  requests.push({ auth: req.headers.authorization, body });
+  requests.push({ auth: req.headers.authorization, body, url: req.url, apiKey: req.headers['x-api-key'] });
+  if (req.url === '/anthropic/messages') {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const event = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+    event('message_start', { message: { id: 'msg_fixture', type: 'message', role: 'assistant', model: 'mock', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } });
+    event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
+    event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'Native reasoning variant applied.' } });
+    event('content_block_stop', { index: 0 });
+    event('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 5 } });
+    event('message_stop', {});
+    res.end(); return;
+  }
   if (body.messages.some(m => m.role === 'user' && m.content === 'EARLY_UPSTREAM_REJECTION')) {
     res.writeHead(403, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'Fixture provider rejected this request.', type: 'permission_error' } }));
@@ -114,7 +125,15 @@ const globalConfig = {
   plugin: [pathToFileURL(loginPlugin).href],
   provider: {
     'fixture-oauth': { npm: '@ai-sdk/openai-compatible', options: { baseURL: baseURL + '/v1' }, models: { mock: { name: 'Subscription fixture', temperature: true, limit: { context: 100000, output: 1000 } } } },
-    'fixture-api': { npm: '@ai-sdk/openai-compatible', options: { baseURL: baseURL + '/v1' }, models: { mock: { name: 'Saved key fixture', limit: { context: 100000, output: 1000 } } } },
+    'fixture-api': { npm: '@ai-sdk/openai-compatible', options: { baseURL: baseURL + '/v1' }, models: {
+      mock: { name: 'Saved key fixture', limit: { context: 100000, output: 1000 } },
+      'DeepSeek-V4.1-Flash-line2-maas': { name: 'DeepSeek-V4.1-Flash-line2-maas', reasoning: false, options: { reasoningEffort: 'xhigh' }, limit: { context: 100000, output: 1000 } },
+      'native-variants': { reasoning: true, options: { reasoningEffort: 'xhigh', fixture_nested: { keep: 'base', choose: 'base' } }, variants: { low: { reasoningEffort: 'low' }, high: { reasoningEffort: 'high', fixture_nested: { choose: 'native-high' } }, max: { reasoningEffort: 'max' }, private: { privateVariantToken: 'must-not-enter-metadata' } }, limit: { context: 100000, output: 1000 } },
+    } },
+    'fixture-anthropic': { npm: '@ai-sdk/anthropic', options: { baseURL: baseURL + '/anthropic' }, models: {
+      'native-thinking': { reasoning: true, variants: { high: { thinking: { type: 'enabled', budgetTokens: 1024 } } }, limit: { context: 100000, output: 4096 } },
+      'no-reasoning': { reasoning: false, limit: { context: 100000, output: 4096 } },
+    } },
   },
   // These would be dangerous for the API worker if inherited without restrictions.
   permission: { '*': 'allow' },
@@ -125,6 +144,7 @@ await writeFile(path.join(configDir, 'opencode.json'), originalConfig);
 await writeFile(authFile, JSON.stringify({
   'fixture-oauth': { type: 'oauth', access: 'fixture-expired-access', refresh: 'fixture-refresh', expires: 0 },
   'fixture-api': { type: 'api', key: 'fixture-saved-api-key' },
+  'fixture-anthropic': { type: 'api', key: 'fixture-native-api-key' },
   untouched: { type: 'api', key: 'fixture-unrelated-key' },
 }));
 Object.assign(process.env, {
@@ -270,6 +290,67 @@ test('explicit model selection still uses the global saved key and ignores a Mag
   assert.equal(response.status, 200, JSON.stringify(await response.json()));
   assert.equal(requests.at(-1).auth, 'Bearer fixture-saved-api-key');
   assert.equal(refreshes, 1, 'Refreshed credentials survive a new worker');
+});
+
+test('reasoning_effort on the reported custom DeepSeek name reaches upstream and overrides defaults only when requested', { timeout: 120000 }, async () => {
+  const selected = new OpenCodeBridge({ ...options, models: { 'oc-default': { ...options.models['oc-default'], model: 'fixture-api/DeepSeek-V4.1-Flash-line2-maas' } } });
+  for (const reasoning_effort of ['high', 'low', 'none', 'max', undefined]) {
+    const before = requests.length;
+    const response = await request({ messages: [{ role: 'user', content: 'Hello' }], ...(reasoning_effort === undefined ? {} : { reasoning_effort }), stream: reasoning_effort === 'high' }, selected);
+    assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
+    if (reasoning_effort === 'high') await Array.fromAsync(sseEvents(response.body));
+    else assert.equal((await response.json()).choices[0].finish_reason, 'stop');
+    assert.equal(requests.length, before + 1);
+    assert.equal(requests.at(-1).body.model, 'DeepSeek-V4.1-Flash-line2-maas');
+    assert.equal(requests.at(-1).body.reasoning_effort, reasoning_effort ?? 'xhigh');
+  }
+});
+
+test('native OpenCode variants are applied and only public reasoning metadata is advertised', { timeout: 60000 }, async () => {
+  const discovered = new OpenCodeBridge({ ...options, discoverModels: true });
+  await discovered.loadModels();
+  const model = discovered.config.models['fixture-api/native-variants'];
+  assert.equal(model.reasoning, true);
+  assert.deepEqual(model.reasoningEfforts.sort(), ['high', 'low', 'max', 'medium']);
+  assert.equal(JSON.stringify(discovered.config.models).includes('must-not-enter-metadata'), false);
+  const response = await discovered.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'fixture-api/native-variants', reasoning_effort: 'high', messages: [{ role: 'user', content: 'Hello' }] }) });
+  assert.equal(response.status, 200, JSON.stringify(await response.json()));
+  assert.equal(requests.at(-1).body.reasoning_effort, 'high');
+  assert.deepEqual(requests.at(-1).body.fixture_nested, { keep: 'base', choose: 'native-high' });
+  const file = path.join(home, 'reasoning-bridge.json');
+  await writeFile(file, JSON.stringify({ ...options, discoverModels: true, onFailure: undefined }));
+  const plugin = await OpenCodeBridgePlugin({}, { configFile: file });
+  const cfg = {};
+  await plugin.config(cfg);
+  assert.equal(cfg.provider['opencode-bridge'].models['fixture-api/native-variants'].reasoning, true);
+  assert.ok(cfg.provider['opencode-bridge'].models['fixture-api/native-variants'].variants.high);
+  const metadata = await plugin.provider.models({ models: {} });
+  assert.equal(metadata['fixture-api/native-variants'].capabilities.reasoning, true);
+  assert.deepEqual(metadata['fixture-api/native-variants'].variants.high, {});
+  assert.equal(JSON.stringify(metadata).includes('must-not-enter-metadata'), false);
+});
+
+test('native SDK reasoning uses OpenCode thinking options and unmappable requests return 400 before inference', { timeout: 60000 }, async () => {
+  const selected = new OpenCodeBridge({ ...options, onFailure: undefined, models: {
+    'native-thinking': { model: 'fixture-anthropic/native-thinking', context: 100000, output: 4096 },
+    'no-reasoning': { model: 'fixture-anthropic/no-reasoning', context: 100000, output: 4096 },
+  } });
+  const send = model => selected.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model, reasoning_effort: 'high', messages: [{ role: 'user', content: 'Hello' }], stream: true }) });
+  const response = await send('native-thinking');
+  assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
+  const chunks = await Array.fromAsync(sseEvents(response.body));
+  assert.equal(chunks.map(c => c.choices[0]?.delta.content ?? '').join(''), 'Native reasoning variant applied.');
+  assert.deepEqual(requests.at(-1).body.thinking, { type: 'enabled', budget_tokens: 1024 });
+  assert.equal(requests.at(-1).body.reasoning_effort, undefined, 'Native Anthropic must not receive an OpenAI field');
+  assert.equal(requests.at(-1).apiKey, 'fixture-native-api-key');
+  const before = requests.length;
+  const rejected = await send('no-reasoning');
+  const error = (await rejected.json()).error;
+  assert.equal(rejected.status, 400, JSON.stringify(error));
+  assert.equal(error.param, 'reasoning_effort');
+  assert.equal(error.code, 'unsupported_reasoning_effort');
+  assert.equal(requests.length, before, 'An unmappable request must not infer with its effort silently ignored');
+  assert.equal(selected.active, 0);
 });
 
 test('upstream rejection before any output returns an HTTP error instead of a successful empty SSE stream', { timeout: 60000 }, async () => {

@@ -8,6 +8,11 @@ import { OpenCodeBridge, normalizeConfig } from '../lib/bridge.mjs';
 const models = { test: { output: 100 } };
 const base = () => ({ model: 'test', messages: [{ role: 'user', content: 'Hello' }] });
 
+test('reasoning_effort accepts API levels and rejects invalid values before inference', () => {
+  for (const reasoning_effort of ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) assert.equal(validateRequest({ ...base(), reasoning_effort }, models).reasoning_effort, reasoning_effort);
+  for (const reasoning_effort of ['', 'HIGH', 'thinking', null, 0, {}, []]) assert.throws(() => validateRequest({ ...base(), reasoning_effort }, models), error => error.status === 400 && error.param === 'reasoning_effort');
+});
+
 test('workingDirectory resolves relative to the config file and rejects invalid path values', () => {
   const directory = path.resolve('fixture-config');
   const relative = 'workspace 中文 with spaces';

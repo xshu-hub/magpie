@@ -131,6 +131,14 @@ empty field emitted by Cherry Studio 2.0.14. Nonempty reasoning becomes a
 separate native OpenCode reasoning part, with provider SDKs owning its upstream
 representation. Unknown message fields report their name and exact path.
 The addon README records the supported API subset and experimental-hook constraints.
+Client `reasoning_effort` is applied by the OpenCode worker's parameter hook.
+Explicit effort overrides defaults; omission preserves them. The actual model's
+same-name variant supplies native thinking settings. OpenAI-family SDKs can use
+their native reasoningEffort option without a variant; unmappable native SDK
+requests return a specific 400 before inference. Catalog metadata copies only
+the reasoning flag and standard variant names, never their option values.
+The official Magpie compatibility test verifies upstream effort values through
+the whole transport, including concurrent requests with different efforts.
 
 [`migrate_notice_test.go`](../../internal/provider/migrate_notice_test.go) includes `TestMovedBuiltinsSayTheirPlugin`, which checks that moved built-ins tell contributors which plugin serves them. Migration tests live beside [`migrate.go`](../../internal/provider/migrate.go).
 

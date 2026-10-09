@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { executableCommand } from './command.mjs';
 import { ApiError, validateRequest, toolName, nativeToolName, usageOf, sseEvents } from './protocol.mjs';
+import { publicReasoning } from './reasoning.mjs';
 
 const SDK = { 'openai-chat': '@ai-sdk/openai-compatible', 'openai-responses': '@ai-sdk/openai', anthropic: '@ai-sdk/anthropic' };
 const delay = (ms, signal) => new Promise((resolve, reject) => {
@@ -180,7 +181,7 @@ async function discoverGlobalModels(config) {
       for (const [id, model] of Object.entries(provider.models ?? {})) {
         const alias = provider.id + '/' + id;
         if (!/^[^/\s]+\/\S+$/.test(alias) || model.capabilities?.output?.text === false || model.capabilities?.input?.text === false) continue;
-        models[alias] = { model: alias, name: model.name || id, context: limit(model.limit?.context, 128000), output: limit(model.limit?.output, 16384) };
+        models[alias] = { model: alias, name: model.name || id, context: limit(model.limit?.context, 128000), output: limit(model.limit?.output, 16384), ...publicReasoning(model) };
       }
     }
     return models;
@@ -210,7 +211,7 @@ function mcpServer(body, token) {
       let result;
       switch (rpc.method) {
         case 'initialize':
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.9.0' } };
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.10.0' } };
           break;
         case 'ping': result = {}; break;
         case 'tools/list':
@@ -242,7 +243,7 @@ export class OpenCodeBridge {
   async loadModels() {
     if (!this.config.discoverModels) return this.config.models;
     this.catalog ??= discoverGlobalModels(this.config).then(models => {
-      this.config.models = { ...models, ...this.config.models };
+      this.config.models = { ...models, ...Object.fromEntries(Object.entries(this.config.models).map(([alias, model]) => [alias, { ...(models[model.model] ?? {}), ...model }])) };
       return this.config.models;
     }).catch(error => { this.catalog = undefined; throw error; });
     return this.catalog;
@@ -362,10 +363,15 @@ export class OpenCodeBridge {
       const hookDeadline = Date.now() + this.config.startupTimeoutMs;
       const buffered = [initial.value];
       const nextEvent = () => iterator.next().then(event => ({ event }), error => ({ error }));
+      const hookState = () => readFile(hookFile, 'utf8').then(JSON.parse, () => undefined).catch(() => undefined);
+      const checkHookError = ready => {
+        if (ready?.error) throw new ApiError(ready.error.message, ready.error.status, ready.error.param, ready.error.code);
+      };
       let pending = nextEvent();
       while (true) {
         combined.throwIfAborted();
-        const ready = await readFile(hookFile, 'utf8').then(JSON.parse, () => undefined).catch(() => undefined);
+        const ready = await hookState();
+        checkHookError(ready);
         if (ready?.history === true && ready?.params === true) break;
         if (worker.error || worker.child.exitCode !== null || Date.now() >= hookDeadline) throw new ApiError('OpenCode did not invoke the required message and parameter hooks. Check runtime/plugin compatibility.', 503, null, 'opencode_hooks_incompatible');
         const next = await Promise.race([pending, delay(50, combined).then(() => ({}))]);
@@ -375,6 +381,7 @@ export class OpenCodeBridge {
         const event = next.event.value;
         const p = event.properties ?? {};
         if (p.sessionID === sessionID || p.info?.sessionID === sessionID) {
+          if (event.type === 'session.error' || p.info?.error) checkHookError(await hookState());
           if (event.type === 'session.error') throw new ApiError(p.error?.data?.message ?? 'OpenCode could not prepare inference.', 502, null, 'opencode_session_error');
           if (p.info?.error) throw new ApiError(p.info.error.data?.message ?? 'OpenCode could not prepare inference.', 502, null, 'opencode_inference_error');
         }

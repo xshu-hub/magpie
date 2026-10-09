@@ -1,5 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { toNativeHistory } from './protocol.mjs';
+import { applyReasoning } from './reasoning.mjs';
 
 // This is loaded through OpenCode's public plugin config, without patching OpenCode.
 export const BridgeWorker = async ({ directory }) => {
@@ -44,6 +45,12 @@ export const BridgeWorker = async ({ directory }) => {
       const requested = body.max_completion_tokens ?? body.max_tokens;
       if (requested !== undefined && input.model.limit.output > 0 && requested > input.model.limit.output) throw new Error('Requested output tokens exceed the OpenCode model limit.');
       output.maxOutputTokens = requested ?? Math.min(outputLimit, input.model.limit.output || outputLimit);
+      try {
+        output.options = applyReasoning(input.model, output.options, body.reasoning_effort);
+      } catch (error) {
+        if (error.param === 'reasoning_effort') await writeFile(hookFile, JSON.stringify({ error: { status: error.status, ...error.body().error } }), { mode: 0o600 });
+        throw error;
+      }
       await writeFile(hookFile, JSON.stringify({ history: true, params: true }), { mode: 0o600 });
       // Provider defaults may still add vendor-specific options; request fields are never invented.
     },

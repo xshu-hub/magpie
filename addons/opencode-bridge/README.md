@@ -1,6 +1,6 @@
 # Magpie OpenCode bridge
 
-0.9.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号和并发请求数**。可通过 `workingDirectory` 指定工作目录。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
+0.10.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号和并发请求数**。支持 `reasoning_effort` 思考强度，也可通过 `workingDirectory` 指定工作目录。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
 
 请求方向：客户端 → Magpie → 插件 → 全局 OpenCode → 它配置的上游。也可运行独立的 OpenAI Chat HTTP 服务。
 
@@ -24,7 +24,7 @@ opencode models
 也可在解压目录用已有 CLI 安装（`magpie` 替换为本机 CLI 的实际命令或 EXE 路径）：
 
 ```powershell
-tar -xzf xshu-hub-magpie-opencode-bridge-0.9.0.tgz
+tar -xzf xshu-hub-magpie-opencode-bridge-0.10.0.tgz
 magpie plugin add .\package
 magpie plugin login opencode-bridge
 magpie serve
@@ -90,6 +90,27 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 
 流式请求设置 `stream: true`。工具调用使用普通 OpenAI `tools`；客户端执行函数后，把 assistant 的 `tool_calls` 与对应 `role: tool` 消息加入下一次请求。不需要额外 session ID。
 
+### 思考强度
+
+0.10.0 起接受 `reasoning_effort` 的 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。例如：
+
+```json
+{
+  "model": "opencode-bridge/provider/DeepSeek-V4.1-Flash-line2-maas",
+  "messages": [{ "role": "user", "content": "你好" }],
+  "reasoning_effort": "high",
+  "stream": true
+}
+```
+
+模型名换成网关实际列出的完整 ID。0.9.0 及更早版本会拒绝此参数；当 Magpie 把这个拒绝描述为模型不接受 `high` 时，实际原因可能是旧桥接尚未接入该字段。
+
+桥接在真实 OpenCode 的 `chat.params` hook 中优先应用该模型当前的同名 variant，保留其中的 thinking 预算、推理选项和嵌套设置。显式请求覆盖模型默认值以及此前 hook 的默认设置。没有同名 variant 的 `@ai-sdk/openai-compatible`、`@ai-sdk/openai` 和 `@ai-sdk/azure` 模型使用原生 `reasoningEffort` 选项，由 OpenCode 的 SDK 序列化为上游协议；其他 SDK 缺少可用同名 variant 时返回 `400 unsupported_reasoning_effort`，字段为 `reasoning_effort`，不会静默忽略，也不会猜测供应商的 thinking 预算。
+
+未指定 `reasoning_effort` 时保留 OpenCode 原有默认选项。`none` 也是明确的请求值；关闭推理的具体语义由对应 variant、SDK 和上游负责。这里接受某个值不代表每个模型都支持它，最终可用档位和供应商限制仍由目标模型决定。
+
+自动模型发现同步 OpenCode 的 reasoning 标记和标准强度的 variant 名称，使 Magpie 可展示模型实际提供的档位；不复制 variant 的选项、凭证或 headers。`oc-default` 未明确绑定模型时不猜测档位。显式别名启用 `discoverModels` 后可继承它所选模型的公开思考能力。更新插件后重新加载，以刷新模型目录。
+
 ## 全局模式的运行方式
 
 每个请求启动同一全局安装中的 OpenCode 程序。默认工作目录是系统临时目录下的 `magpie-oc-<随机字符>/workspace`；模型发现使用 `magpie-oc-models-<随机字符>/workspace`。请求结束、取消或失败后清理这些临时文件。HOME、配置、登录和认证插件保留原路径，所以 token 刷新由 OpenCode 写回真实登录文件，不是复制一份快照再丢弃。桥接代码不解析或发送供应商 token。
@@ -128,11 +149,12 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 | stream=true/false | 支持；首个模型输出前的失败返回 HTTP JSON 错误，输出后的失败发送 SSE error 后关闭；成功以 `[DONE]` 结束 |
 | tools、同轮多个调用、工具结果续接 | 支持普通 function 工具与文本结果；结果按 tool_call_id 匹配 |
 | temperature、top_p、max_tokens/max_completion_tokens | 通过 OpenCode 参数 hook 设置；最终接受范围由实际模型决定 |
+| reasoning_effort | 支持；显式值覆盖默认，优先使用 OpenCode 同名 variant，OpenAI 系 SDK 可使用原生选项；其他 SDK 无映射时返回 400 |
 | stream_options.include_usage | 支持；计数来自 OpenCode |
 | tool_choice | auto/none；none 不注册工具 |
 | n | 仅 1 |
 | 图片、音频、视频、嵌入、文件、JSON schema 输出 | 未实现，返回 400/404 |
-| stop、seed、logprobs、penalties、logit_bias、reasoning_effort、strict=true、指定工具、parallel_tool_calls 参数 | 不支持，明确报错 |
+| stop、seed、logprobs、penalties、logit_bias、strict=true、指定工具、parallel_tool_calls 参数 | 不支持，明确报错 |
 | 原生 Responses | 独立服务未实现；Magpie 既有转换可用，但验收保证限于 Chat |
 
 工具参数在完整解析后返回，不保留原始逐字 delta、JSON 空白或字段顺序。MCP 使用哈希工具名，外部恢复原名；schema 根级 `additionalProperties=true` 和 strict 模式被拒绝。developer 会转成 system，工具结果可能按原调用顺序归组。供应商的所有扩展字段和原始 HTTP 状态不保证透传。
@@ -177,4 +199,4 @@ TEST_OPENCODE_COMMAND='["/absolute/path/to/opencode"]' \
 
 测试全部使用临时 HOME 和 loopback fixture，不接触真实登录。并发测试让四个真实 OpenCode worker 在同一个指定 cwd 下的上游请求同时保持活动，验证混合流式/非流式结果隔离、独立数据库、复用登录和独立取消。目录测试覆盖带中文及空格的路径、相对配置路径、模型发现与推理的实际 cwd、错误目录、项目配置仍关闭、默认临时目录清理以及指定目录的现有文件保留。
 
-GitHub workflow 在 Windows/Linux 上分别验证 OpenCode 1.16.2 和 1.18.35，并把已打包的插件安装到 SHA256 核验过的官方 Magpie CLI 0.1.1141 中，检查自动模型发现、普通回复、SSE、工具结果续接和四请求同目录并发。该流程只打包一份两种平台通用的插件，不编译或交付 Magpie。官方 EXE 仅下载用于测试，保持原始字节。测试其他版本时可用 `TEST_OPENCODE_PLUGIN_DIR` 指定测试安装中的真实 SDK 目录，`TEST_OPENCODE_VERSION` 用于核验版本响应头；这些变量没有运行版本白名单。单独运行原版 Magpie 验证时，需要设置 `TEST_MAGPIE_COMMAND`（JSON 可执行文件数组）、`TEST_BRIDGE_PACKAGE`（已打包 tgz 路径）以及上述 OpenCode 变量，再运行 `npm run test:magpie`。GUI 点击安装流程没有纳入该 CLI 验收。
+GitHub workflow 在 Windows/Linux 上分别验证 OpenCode 1.16.2 和 1.18.35，并把已打包的插件安装到 SHA256 核验过的官方 Magpie CLI 0.1.1141 中，检查自动模型发现、普通回复、SSE、工具结果续接和四请求同目录并发。思考强度检查覆盖报告中的自定义 DeepSeek 模型名、OpenAI compatible 原生字段、默认值保留、OpenCode 嵌套 variant、原生 Anthropic thinking、无映射时推理前拒绝，以及并发不同强度互不串扰。上游为本地 fixture，这不代表已验证报告人的内网 MaaS 对各个档位的接受范围。该流程只打包一份两种平台通用的插件，不编译或交付 Magpie。官方 EXE 仅下载用于测试，保持原始字节。测试其他版本时可用 `TEST_OPENCODE_PLUGIN_DIR` 指定测试安装中的真实 SDK 目录，`TEST_OPENCODE_VERSION` 用于核验版本响应头；这些变量没有运行版本白名单。单独运行原版 Magpie 验证时，需要设置 `TEST_MAGPIE_COMMAND`（JSON 可执行文件数组）、`TEST_BRIDGE_PACKAGE`（已打包 tgz 路径）以及上述 OpenCode 变量，再运行 `npm run test:magpie`。GUI 点击安装流程没有纳入该 CLI 验收。
