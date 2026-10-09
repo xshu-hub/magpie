@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +22,16 @@ import (
 // This opt-in test runs Magpie's real gateway and plugin host, and the official
 // unmodified OpenCode v1 binary. The upstream alone is a loopback fixture.
 func TestOpenCodeV1Bridge(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		name := "isolated"
+		if global {
+			name = "global"
+		}
+		t.Run(name, func(t *testing.T) { testOpenCodeV1Bridge(t, global) })
+	}
+}
+
+func testOpenCodeV1Bridge(t *testing.T, global bool) {
 	command := os.Getenv("TEST_OPENCODE_COMMAND")
 	if command == "" {
 		t.Skip("set TEST_OPENCODE_COMMAND to run the real OpenCode v1 bridge")
@@ -32,7 +43,9 @@ func TestOpenCodeV1Bridge(t *testing.T) {
 	fresh(t)
 	t.Setenv("MAGPIE_BUN", bun)
 	t.Cleanup(plugin.Settle)
+	var calls atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		if r.URL.Path != "/v1/chat/completions" || r.Header.Get("Authorization") != "Bearer fixture-key" || !strings.Contains(string(body), "gateway sentinel") {
 			t.Errorf("unexpected OpenCode inference: %s %s", r.URL.Path, body)
@@ -69,20 +82,82 @@ func TestOpenCodeV1Bridge(t *testing.T) {
 		"command": cmd, "timeoutMs": 60000,
 		"models": map[string]any{"oc-mock": map[string]any{"protocol": "openai-chat", "baseURL": up.URL + "/v1", "id": "mock", "context": 100000, "output": 1000}},
 	}
+	addon, _ := filepath.Abs("../../addons/opencode-bridge")
+	if global {
+		t.Setenv("XDG_DATA_HOME", t.TempDir())
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		for _, key := range []string{"OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "OPENCODE_AUTH_CONTENT"} {
+			t.Setenv(key, "")
+		}
+		t.Setenv("OPENCODE_DISABLE_MODELS_FETCH", "1")
+		dir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "opencode")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.CopyFS(filepath.Join(dir, "node_modules", "@opencode-ai", "plugin"), os.DirFS(filepath.Join(addon, "node_modules", "@opencode-ai", "plugin"))); err != nil {
+			t.Fatal(err)
+		}
+		write := func(file string, value any) {
+			t.Helper()
+			if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+				t.Fatal(err)
+			}
+			b, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(file, b, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		deps := map[string]string{"@opencode-ai/plugin": "1.18.35"}
+		write(filepath.Join(dir, "package.json"), map[string]any{"private": true, "dependencies": deps})
+		write(filepath.Join(dir, "package-lock.json"), map[string]any{"lockfileVersion": 3, "packages": map[string]any{"": map[string]any{"dependencies": deps}, "node_modules/@opencode-ai/plugin": map[string]any{"version": "1.18.35"}}})
+		write(filepath.Join(dir, "opencode.json"), map[string]any{
+			"$schema": "https://opencode.ai/config.json", "model": "fixture-global/mock",
+			"provider": map[string]any{"fixture-global": map[string]any{
+				"npm": "@ai-sdk/openai-compatible", "options": map[string]any{"baseURL": up.URL + "/v1"},
+				"models": map[string]any{"mock": map[string]any{"limit": map[string]int{"context": 100000, "output": 1000}}},
+			}},
+		})
+		write(filepath.Join(os.Getenv("XDG_DATA_HOME"), "opencode", "auth.json"), map[string]any{"fixture-global": map[string]string{"type": "api", "key": "fixture-key"}})
+		config["mode"] = "global"
+		config["models"] = map[string]any{"oc-mock": map[string]any{"context": 100000, "output": 1000}}
+	}
 	b, _ := json.Marshal(config)
 	file := filepath.Join(t.TempDir(), "bridge.json")
 	if err := os.WriteFile(file, b, 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("MAGPIE_OPENCODE_CONFIG", file)
-	addon, _ := filepath.Abs("../../addons/opencode-bridge")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if _, err := plugin.Add(ctx, addon); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.PluginAPIKey(ctx, "opencode-bridge", 0, nil, "fixture-key"); err != nil {
-		t.Fatal(err)
+	if global {
+		st, err := provider.StartPluginSignIn("opencode-bridge", 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			status, ok := provider.SignInStatus(st.ID)
+			if !ok || status.State == "failed" || status.State == "canceled" {
+				t.Fatalf("global OpenCode activation: %+v", status)
+			}
+			if status.State == "done" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("global OpenCode activation did not finish")
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	} else {
+		if _, err := provider.PluginAPIKey(ctx, "opencode-bridge", 0, nil, "fixture-key"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s := New()
 	gw := httptest.NewServer(lanGuard(s.Handler()))
@@ -124,5 +199,8 @@ func TestOpenCodeV1Bridge(t *testing.T) {
 	code, body = ask(`{"model":"opencode-bridge/oc-mock","messages":[` + user + `,` + string(result.Choices[0].Message) + `,{"role":"tool","tool_call_id":"call_fixture","content":"23C"}],"tools":` + tools + `}`)
 	if code != 200 || !strings.Contains(body, "Through real OpenCode v1") {
 		t.Fatalf("real gateway tool continuation: HTTP %d %s", code, body)
+	}
+	if calls.Load() != 4 {
+		t.Fatalf("four client requests caused %d upstream inferences", calls.Load())
 	}
 }

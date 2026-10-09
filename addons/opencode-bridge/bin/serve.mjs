@@ -14,7 +14,7 @@ const value = (flag, fallback) => {
   return args[index + 1];
 };
 if (args.includes('--help')) {
-  console.log('Usage: magpie-opencode-bridge --config config.json [--port 8787] [--opencode /path/to/v1/executable]\nSet BRIDGE_API_KEY for client authentication. Set each configured model apiKeyEnv for upstream authentication.');
+  console.log('Usage: magpie-opencode-bridge --config config.json [--port 8787] [--opencode /path/to/v1/executable]\nSet BRIDGE_API_KEY for client authentication. Global mode reuses OpenCode login; isolated mode needs an upstream API key.');
   process.exit(0);
 }
 const configFile = path.resolve(value('--config', 'config.json'));

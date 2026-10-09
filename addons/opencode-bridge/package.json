@@ -1,6 +1,6 @@
 {
   "name": "@xshu-hub/magpie-opencode-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "OpenAI Chat API through the real, unmodified OpenCode v1 program",
   "license": "MIT",
@@ -14,6 +14,7 @@
     "lib",
     "bin",
     "config.example.json",
+    "config.isolated.example.json",
     "README.md",
     "LICENSE"
   ],
@@ -28,7 +29,7 @@
   ],
   "scripts": {
     "test": "node --test test/unit.test.mjs",
-    "test:integration": "node --test --test-concurrency=1 test/integration.test.mjs"
+    "test:integration": "node --test --test-concurrency=1 test/integration.test.mjs test/global.test.mjs"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.18.35"

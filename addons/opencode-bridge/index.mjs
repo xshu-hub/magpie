@@ -19,7 +19,12 @@ export const OpenCodeBridgePlugin = async (_, options = {}) => {
     },
     auth: {
       provider: id,
-      methods: [{ type: 'api', label: 'Upstream API key (or placeholder when apiKeyEnv is configured)' }],
+      methods: config.mode === 'global'
+        ? [{ type: 'oauth', label: 'Use the current global OpenCode login', authorize: async () => ({
+          url: '', instructions: 'Uses OpenCode\'s existing login and plugins. No upstream API key is needed.', method: 'auto',
+          callback: async () => ({ type: 'success', key: 'opencode-global' }),
+        }) }]
+        : [{ type: 'api', label: 'Upstream API key (or placeholder when apiKeyEnv is configured)' }],
       loader: async (getAuth) => ({
         apiKey: 'opencode-bridge', baseURL: 'http://opencode-bridge.local/v1',
         fetch: async (url, init) => {

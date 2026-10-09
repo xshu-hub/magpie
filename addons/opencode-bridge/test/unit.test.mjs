@@ -1,8 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validateRequest, toNativeHistory, nativeToolName, usageOf, sseEvents } from '../lib/protocol.mjs';
+import { normalizeConfig } from '../lib/bridge.mjs';
 const models = { test: { output: 100 } };
 const base = () => ({ model: 'test', messages: [{ role: 'user', content: 'Hello' }] });
+test('global mode needs no supplier configuration or upstream key and serializes shared auth', () => {
+  const config = normalizeConfig({ mode: 'global' });
+  assert.deepEqual(config.command, ['opencode']);
+  assert.equal(config.maxConcurrent, 1);
+  assert.deepEqual(Object.keys(config.models), ['oc-default']);
+  assert.equal(config.models['oc-default'].model, undefined);
+  assert.throws(() => normalizeConfig({ mode: 'global', maxConcurrent: 2 }), /shared|shares/);
+  assert.throws(() => normalizeConfig({ mode: 'global', models: { test: { baseURL: 'https://api.example/v1', context: 1, output: 1 } } }), /credentials/);
+  assert.throws(() => normalizeConfig({ mode: 'global', models: { test: { model: 'missing-provider', context: 1, output: 1 } } }), /provider\/model/);
+});
 test('reject unsupported API semantics before inference', () => {
   for (const extra of [{ n: 2 }, { response_format: { type: 'json_object' } }, { tool_choice: 'required' }, { parallel_tool_calls: false }, { max_tokens: 101 }, { stop: ['x'] }, { stream: 'yes' }, { temperature: -1 }]) assert.throws(() => validateRequest({ ...base(), ...extra }, models));
   assert.throws(() => validateRequest({ ...base(), messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/image' } }] }] }, models));

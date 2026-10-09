@@ -2,7 +2,7 @@ import http from 'node:http';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { mkdtemp, mkdir, writeFile, rm, symlink, cp, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink, cp, readFile, access } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { ApiError, validateRequest, toolName, nativeToolName, usageOf, sseEvents } from './protocol.mjs';
@@ -18,23 +18,59 @@ const delay = (ms, signal) => new Promise((resolve, reject) => {
 
 export function normalizeConfig(input, directory = process.cwd()) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ApiError('Bridge configuration must be an object.', 500);
+  const mode = input.mode ?? 'isolated';
+  if (!['isolated', 'global'].includes(mode)) throw new ApiError('mode must be global or isolated.', 500);
   const configuredCommand = input.command ?? ['opencode'];
   if (!Array.isArray(configuredCommand) || !configuredCommand.length || configuredCommand.some(x => typeof x !== 'string' || !x)) throw new ApiError('command must be an executable and optional argument array.', 500);
   const command = [...configuredCommand];
   if (command[0].includes('/') || command[0].includes('\\')) command[0] = path.resolve(directory, command[0]);
-  const models = input.models;
+  const models = input.models ?? (mode === 'global' ? { 'oc-default': { name: 'OpenCode default model', context: 128000, output: 16384 } } : undefined);
   if (!models || Array.isArray(models) || typeof models !== 'object' || !Object.keys(models).length) throw new ApiError('Configure at least one model.', 500);
   for (const [alias, model] of Object.entries(models)) {
-    if (!alias || !model || typeof model.id !== 'string' || !model.id || !Object.hasOwn(SDK, model.protocol)) throw new ApiError('Each model needs id and protocol (openai-chat, openai-responses, anthropic).', 500);
-    let url;
-    try { url = new URL(model.baseURL); } catch { throw new ApiError('Each model needs an absolute upstream baseURL.', 500); }
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new ApiError('Invalid upstream baseURL.', 500);
-    if (model.apiKeyEnv !== undefined && (typeof model.apiKeyEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(model.apiKeyEnv))) throw new ApiError('apiKeyEnv must name an environment variable.', 500);
+    if (!alias || !model || typeof model !== 'object' || Array.isArray(model)) throw new ApiError('Each model must be an object.', 500);
+    if (mode === 'global') {
+      if (['id', 'protocol', 'baseURL', 'apiKeyEnv'].some(k => model[k] !== undefined)) throw new ApiError('Global mode uses OpenCode credentials and providers; use model="provider/model" only to select a model.', 500);
+      if (model.model !== undefined && (typeof model.model !== 'string' || !/^[^/\s]+\/\S+$/.test(model.model))) throw new ApiError('Global model must be provider/model, or omitted for the OpenCode default.', 500);
+    } else {
+      if (typeof model.id !== 'string' || !model.id || !Object.hasOwn(SDK, model.protocol)) throw new ApiError('Each isolated model needs id and protocol (openai-chat, openai-responses, anthropic).', 500);
+      let url;
+      try { url = new URL(model.baseURL); } catch { throw new ApiError('Each model needs an absolute upstream baseURL.', 500); }
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new ApiError('Invalid upstream baseURL.', 500);
+      if (model.apiKeyEnv !== undefined && (typeof model.apiKeyEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(model.apiKeyEnv))) throw new ApiError('apiKeyEnv must name an environment variable.', 500);
+    }
     for (const key of ['context', 'output']) if (!Number.isInteger(model[key]) || model[key] <= 0) throw new ApiError('Each model needs positive integer context and output limits.', 500);
   }
-  const config = { ...input, command: [...command], models, maxConcurrent: input.maxConcurrent ?? 2, timeoutMs: input.timeoutMs ?? 120000, startupTimeoutMs: input.startupTimeoutMs ?? 30000 };
+  const config = { ...input, mode, command: [...command], models, maxConcurrent: input.maxConcurrent ?? (mode === 'global' ? 1 : 2), timeoutMs: input.timeoutMs ?? 120000, startupTimeoutMs: input.startupTimeoutMs ?? 30000 };
   for (const key of ['maxConcurrent', 'timeoutMs', 'startupTimeoutMs']) if (!Number.isInteger(config[key]) || config[key] <= 0) throw new ApiError(`${key} must be a positive integer.`, 500);
+  if (mode === 'global' && config.maxConcurrent !== 1) throw new ApiError('Global mode requires maxConcurrent=1 because OpenCode shares its login and refresh state.', 500);
   return config;
+}
+
+async function executableCommand(command) {
+  if (process.platform !== 'win32') return command;
+  // Node cannot spawn a .cmd/.ps1 shim without a shell. Follow the official npm
+  // package's bin entry instead, preserving PATH selection without shell quoting.
+  let selected = command[0];
+  if (!selected.includes('/') && !selected.includes('\\')) {
+    for (const dir of (process.env.PATH ?? process.env.Path ?? '').split(path.delimiter)) {
+      if (!dir) continue;
+      const candidates = path.extname(selected) ? [selected] : [selected + '.exe', selected + '.com', selected + '.cmd', selected + '.bat', selected];
+      const found = await Promise.all(candidates.map(async name => {
+        const file = path.join(dir.replace(/^"|"$/g, ''), name);
+        return await access(file).then(() => file, () => undefined);
+      }));
+      if (found.some(Boolean)) { selected = found.find(Boolean); break; }
+    }
+  }
+  if (/\.(cmd|bat|ps1)$/i.test(selected)) {
+    for (const root of [path.join(path.dirname(selected), 'node_modules', 'opencode-ai'), path.resolve(path.dirname(selected), '..', 'opencode-ai')]) {
+      const pkg = await readFile(path.join(root, 'package.json'), 'utf8').then(JSON.parse, () => undefined);
+      const bin = typeof pkg?.bin === 'string' ? pkg.bin : pkg?.bin?.opencode;
+      if (pkg?.name === 'opencode-ai' && typeof bin === 'string') return [path.resolve(root, bin), ...command.slice(1)];
+    }
+    throw new ApiError('Cannot resolve this Windows OpenCode shim. Set command to the actual OpenCode executable or a node/script array.', 503, null, 'opencode_unavailable');
+  }
+  return [selected, ...command.slice(1)];
 }
 
 function sandboxEnv(home) {
@@ -49,6 +85,18 @@ function sandboxEnv(home) {
     OPENCODE_DISABLE_AUTOCOMPACT: '1', OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: '1', OPENCODE_EXPERIMENTAL_NATIVE_LLM: '1',
   });
   return env;
+}
+
+function globalEnv(home) {
+  return {
+    ...process.env,
+    // Preserve HOME, XDG paths and authentication plugins. Isolate API sessions,
+    // while refreshes remain owned by OpenCode in its genuine shared auth store.
+    OPENCODE_DB: path.join(home, 'opencode.sqlite'),
+    OPENCODE_DISABLE_PROJECT_CONFIG: '1', OPENCODE_DISABLE_AUTOUPDATE: '1',
+    OPENCODE_DISABLE_DEFAULT_PLUGINS: '0', OPENCODE_DISABLE_EXTERNAL_SKILLS: '1', OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
+    OPENCODE_DISABLE_AUTOCOMPACT: '1', OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: '1', OPENCODE_EXPERIMENTAL_NATIVE_LLM: '0',
+  };
 }
 
 async function seedPluginDependency(home) {
@@ -107,7 +155,7 @@ async function freePort() {
   return port;
 }
 
-function mcpServer(body, token) {
+function mcpServer(body, token, deferred) {
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url !== '/' + token) return res.writeHead(404).end();
@@ -124,7 +172,7 @@ function mcpServer(body, token) {
       let result;
       switch (rpc.method) {
         case 'initialize':
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.1.0' } };
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.2.0' } };
           break;
         case 'ping': result = {}; break;
         case 'tools/list':
@@ -133,7 +181,12 @@ function mcpServer(body, token) {
         case 'tools/call':
           // OpenCode owns execution, but the client must supply the result in its next API request.
           // Park until the model's step-finish event; the worker is then aborted and discarded.
-          return;
+          if (!deferred) return;
+          // Acknowledge deferral only. No client function runs here. This lets
+          // the standard SDK publish finish-step for every provider; the public
+          // message hook blocks a second model step until this worker is aborted.
+          result = { content: [{ type: 'text', text: 'Tool execution deferred to the API client.' }], isError: false };
+          break;
         default:
           return res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, error: { code: -32601, message: 'Method not found' } }));
       }
@@ -159,8 +212,9 @@ export class OpenCodeBridge {
     signal?.throwIfAborted();
     if (this.active >= this.config.maxConcurrent) throw new ApiError('All OpenCode workers are busy. Retry later.', 429, null, 'worker_busy');
     const model = this.config.models[body.model];
+    const global = this.config.mode === 'global';
     const upstreamKey = model.apiKeyEnv ? process.env[model.apiKeyEnv] : apiKey;
-    if (!upstreamKey) throw new ApiError('Upstream API key is missing. Set the configured apiKeyEnv or sign in to the Magpie plugin.', 503, null, 'missing_upstream_key');
+    if (!global && !upstreamKey) throw new ApiError('Upstream API key is missing. Set the configured apiKeyEnv or sign in to the Magpie plugin.', 503, null, 'missing_upstream_key');
     this.active++;
     let home, mcp, version, worker, sessionID, eventController;
     let phase = 'creating sandbox';
@@ -183,32 +237,36 @@ export class OpenCodeBridge {
       home = await mkdtemp(path.join(os.tmpdir(), 'magpie-oc-v1-'));
       const directory = path.join(home, 'workspace');
       await mkdir(directory);
-      await seedPluginDependency(home);
-      const env = sandboxEnv(home);
+      if (!global) await seedPluginDependency(home);
+      const env = global ? globalEnv(home) : sandboxEnv(home);
+      const command = await executableCommand(this.config.command);
       phase = 'version check';
-      version = start(this.config.command, ['--version'], { env, cwd: directory, signal: combined });
+      version = start(command, ['--version'], { env, cwd: directory, signal: combined });
       const checked = await version.done;
       if (checked.error || checked.code !== 0) throw new ApiError('Cannot start configured OpenCode v1 executable.', 503, null, 'opencode_unavailable');
       if (checked.output.trim() !== OPENCODE_VERSION) throw new ApiError(`This bridge requires official OpenCode v${OPENCODE_VERSION}; configured executable reports ${checked.output.trim().slice(0, 100)}.`, 503, null, 'opencode_version');
       const token = randomBytes(24).toString('hex');
-      mcp = mcpServer(body, token);
+      mcp = mcpServer(body, token, global);
       const mcpPort = await listen(mcp);
       const port = await freePort();
       const password = randomBytes(24).toString('hex');
-      const modelID = model.id;
+      const providerID = global ? model.model?.split('/')[0] : 'opencode-bridge';
+      const modelID = global ? model.model?.slice(providerID.length + 1) : model.id;
       const requestFile = path.join(home, 'request.json');
-      await writeFile(requestFile, JSON.stringify({ body, modelID, outputLimit: model.output }), { mode: 0o600 });
+      await writeFile(requestFile, JSON.stringify({ body, modelID, providerID, outputLimit: model.output, global }), { mode: 0o600 });
       const permissions = { '*': 'deny', 'bridge_*': 'allow' };
       const config = {
-        model: 'opencode-bridge/' + modelID, small_model: 'opencode-bridge/' + modelID,
-        provider: { 'opencode-bridge': { name: 'Bridge upstream', npm: SDK[model.protocol], options: { baseURL: model.baseURL, apiKey: upstreamKey }, models: { [modelID]: { name: modelID, temperature: true, limit: { context: model.context, output: model.output } } } } },
+        ...(global
+          ? (model.model ? { model: model.model } : {})
+          : { model: 'opencode-bridge/' + modelID, small_model: 'opencode-bridge/' + modelID,
+            provider: { 'opencode-bridge': { name: 'Bridge upstream', npm: SDK[model.protocol], options: { baseURL: model.baseURL, apiKey: upstreamKey }, models: { [modelID]: { name: modelID, temperature: true, limit: { context: model.context, output: model.output } } } } } }),
         permission: permissions, snapshot: false, autoupdate: false, share: 'disabled',
         plugin: [pathToFileURL(fileURLToPath(new URL('./worker-plugin.mjs', import.meta.url))).href],
         mcp: { bridge: { type: 'remote', url: `http://127.0.0.1:${mcpPort}/${token}`, oauth: false, timeout: this.config.timeoutMs } },
         agent: { bridge: { mode: 'primary', prompt: 'Follow the client instructions.', permission: permissions }, title: { disable: true } },
       };
       Object.assign(env, { OPENCODE_CONFIG_CONTENT: JSON.stringify(config), OPENCODE_SERVER_PASSWORD: password, MAGPIE_BRIDGE_REQUEST: requestFile });
-      worker = start(this.config.command, ['serve', '--hostname', '127.0.0.1', '--port', String(port)], { env, cwd: directory, signal: combined });
+      worker = start(command, ['serve', '--hostname', '127.0.0.1', '--port', String(port)], { env, cwd: directory, signal: combined });
       phase = 'server startup';
       const headers = { authorization: 'Basic ' + Buffer.from('opencode:' + password).toString('base64'), 'content-type': 'application/json' };
       const base = 'http://127.0.0.1:' + port;
@@ -244,8 +302,10 @@ export class OpenCodeBridge {
       const events = await fetch(base + '/event', { headers, signal: eventSignal });
       if (!events.ok || !events.body) throw new ApiError('OpenCode event stream is unavailable.', 502);
       phase = 'inference';
-      await api(`/session/${sessionID}/prompt_async`, { model: { providerID: 'opencode-bridge', modelID }, agent: 'bridge', parts: [{ type: 'text', text: 'Complete the current client request.' }] });
-      return { events: events.body, sessionID, cleanup, signal: combined, abort: () => api(`/session/${sessionID}/abort`, {}, AbortSignal.timeout(2000)) };
+      await api(`/session/${sessionID}/prompt_async`, { ...(providerID ? { model: { providerID, modelID } } : {}), agent: 'bridge', parts: [{ type: 'text', text: 'Complete the current client request.' }] });
+      return { events: events.body, sessionID, cleanup, signal: combined, abort: () => api(`/session/${sessionID}/abort`, {}, AbortSignal.timeout(2000)),
+        diagnose: async details => { if (typeof this.config.onFailure === 'function') await this.config.onFailure({ phase, home, output: worker?.output ?? '', ...details }).catch(() => {}); },
+      };
     } catch (error) {
       if (typeof this.config.onFailure === 'function') await this.config.onFailure({ phase, home, output: worker?.output ?? version?.output ?? '' }).catch(() => {});
       await cleanup();
@@ -305,12 +365,17 @@ export class OpenCodeBridge {
     const toolIDs = new Set();
     const textParts = new Map();
     const assistantIDs = new Set();
+    const trace = [];
     let finished = false;
     try {
       yield chunk({ role: 'assistant', content: '' });
       for await (const event of sseEvents(run.events)) {
         run.signal.throwIfAborted();
         const p = event.properties ?? {};
+        if (typeof this.config.onFailure === 'function') {
+          trace.push({ type: event.type, session: p.sessionID ?? p.part?.sessionID ?? p.info?.sessionID, role: p.info?.role, part: p.part?.type, reason: p.part?.reason });
+          if (trace.length > 50) trace.shift();
+        }
         if (p.sessionID !== run.sessionID && p.part?.sessionID !== run.sessionID && p.info?.sessionID !== run.sessionID) continue;
         if (event.type === 'message.updated' && p.info?.role === 'assistant') {
           assistantIDs.add(p.info.id);
@@ -356,6 +421,7 @@ export class OpenCodeBridge {
         }
       }
       if (!finished) throw new ApiError('OpenCode disconnected before completion.', 502, null, 'incomplete_stream');
-    } finally { await run.cleanup(); }
+    } catch (error) { await run.diagnose?.({ events: trace }); throw error; }
+    finally { await run.cleanup(); }
   }
 }

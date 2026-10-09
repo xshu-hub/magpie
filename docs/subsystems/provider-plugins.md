@@ -84,12 +84,17 @@ The GUI's plugin integration includes `subOf`, `pluginSubs`, and `startPluginSig
 ## Verification
 
 The optional [OpenCode v1 bridge addon](../../addons/opencode-bridge/README.md)
-adds the independent `opencode-bridge` provider. Its fetch drives an isolated,
-unmodified official OpenCode 1.18.35 process, with a public message/parameter
-plugin and client tools registered through MCP. The native LLM configuration
-flag provides a model step boundary before parked client tool calls finish.
-Only the client executes those tools, and the next request replays their results.
-It uses explicitly configured upstream API keys, not subscription token emulation.
+adds the independent `opencode-bridge` provider. Its default example drives the
+global, unmodified official OpenCode 1.18.35 installation with its existing
+configuration, login and authentication plugins. OpenCode owns upstream calls
+and persists token refreshes in its genuine auth store; the bridge does not
+implement supplier authentication. API workspaces and session databases remain
+temporary. Global mode serializes requests sharing login state and uses the
+standard SDK runtime. MCP acknowledges client-tool deferral, allowing a complete
+model step to finish, while the public message hook gates further inference
+before the worker is aborted. Only clients execute their real functions, and
+the next request replays their actual results. Legacy isolated mode still uses
+explicit API keys and the native runtime with parked MCP calls.
 `TestOpenCodeV1Bridge` in `internal/gateway/opencode_bridge_test.go` is an opt-in
 real gateway/host/binary check; the addon has Node protocol and real OpenCode tests.
 The addon README records the supported API subset and experimental-v1 constraints.

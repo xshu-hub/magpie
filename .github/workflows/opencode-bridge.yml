@@ -55,14 +55,15 @@ jobs:
         env:
           CGO_ENABLED: '0'
         run: |
+          test -z "$(gofmt -l internal/gateway/opencode_bridge_test.go)"
           go vet -tags nogui ./...
           mkdir -p artifacts
           if [ "$RUNNER_OS" = Windows ]; then
             go vet ./...
-            go build -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.1.0' -o artifacts/magpie-windows-amd64.exe .
-            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.1.0' -o artifacts/magpie-cli-windows-amd64.exe .
+            go build -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.2.0' -o artifacts/magpie-windows-amd64.exe .
+            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.2.0' -o artifacts/magpie-cli-windows-amd64.exe .
           else
-            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.1.0' -o artifacts/magpie-cli-linux-amd64 .
+            go build -tags nogui -trimpath -ldflags='-s -w -X main.version=opencode-bridge-0.2.0' -o artifacts/magpie-cli-linux-amd64 .
           fi
       - name: Sandbox full terminal Go suite
         if: runner.os == 'Linux'
@@ -78,6 +79,7 @@ jobs:
           npm pack ./addons/opencode-bridge --pack-destination artifacts
           cp addons/opencode-bridge/README.md artifacts/OpenCode-bridge-README.md
           cp addons/opencode-bridge/config.example.json artifacts/config.example.json
+          cp addons/opencode-bridge/config.isolated.example.json artifacts/config.isolated.example.json
           node -e 'const fs=require("fs"),crypto=require("crypto"),path=require("path"); const lines=fs.readdirSync("artifacts").map(n=>crypto.createHash("sha256").update(fs.readFileSync(path.join("artifacts",n))).digest("hex")+"  "+n); fs.writeFileSync("artifacts/SHA256SUMS",lines.join("\n")+"\n")'
       - uses: actions/upload-artifact@v4
         with:

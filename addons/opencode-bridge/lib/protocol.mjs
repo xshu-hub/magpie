@@ -92,7 +92,7 @@ export function validateRequest(body, models) {
 }
 
 // Use OpenCode's public message-transform hook to preserve roles and client tool results.
-export function toNativeHistory(body, sessionID, modelID, directory) {
+export function toNativeHistory(body, sessionID, modelID, directory, providerID = 'opencode-bridge') {
   const system = body.messages.filter(m => ['system', 'developer'].includes(m.role)).map(m => textContent(m.content));
   const messages = [];
   const calls = new Map();
@@ -109,8 +109,8 @@ export function toNativeHistory(body, sessionID, modelID, directory) {
     const id = `msg_bridge_${String(counter++).padStart(8, '0')}`;
     const base = { id, sessionID, role: m.role, time: { created: 0 }, agent: 'bridge' };
     const info = m.role === 'user'
-      ? { ...base, model: { providerID: 'opencode-bridge', modelID } }
-      : { ...base, parentID, modelID, providerID: 'opencode-bridge', mode: 'bridge', path: { cwd: directory, root: directory }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } };
+      ? { ...base, model: { providerID, modelID } }
+      : { ...base, parentID, modelID, providerID, mode: 'bridge', path: { cwd: directory, root: directory }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } };
     const parts = [];
     const content = textContent(m.content, 'content', m.role === 'assistant');
     if (content) parts.push(part(id, { type: 'text', text: content }));
