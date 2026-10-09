@@ -18,7 +18,7 @@ export const BridgeWorker = async ({ directory }) => {
       cfg.snapshot = false;
       cfg.autoupdate = false;
       cfg.share = 'disabled';
-      for (const name of Object.keys(cfg.mcp ?? {})) if (name !== 'bridge') cfg.mcp[name] = { enabled: false };
+      for (const name of Object.keys(cfg.mcp ?? {})) if (name !== 'bridge') cfg.mcp[name] = { ...cfg.mcp[name], enabled: false };
     },
     'experimental.chat.messages.transform': async (_, output) => {
       const r = await get();

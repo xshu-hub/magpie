@@ -130,8 +130,21 @@ const bridge = new OpenCodeBridge(options);
 const request = (body, instance = bridge) => instance.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'oc-default', ...body }) }, 'not-the-upstream-key');
 
 test('real global v1 loads its configured OAuth plugin, refreshes its own login and uses its default model', { timeout: 60000 }, async () => {
-  const response = await request({ messages: [{ role: 'system', content: 'Global system' }, { role: 'user', content: 'Hello' }], stream: true });
-  const chunks = await Array.fromAsync(sseEvents(response.body));
+  const fetchOriginal = globalThis.fetch;
+  let subscriptions = 0;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/event') && subscriptions++ === 0) {
+      assert.equal(requests.length, 0, 'No inference until the event subscription works');
+      return new Response('', { headers: { 'content-type': 'text/event-stream' } });
+    }
+    return fetchOriginal(url, init);
+  };
+  let response, chunks;
+  try {
+    response = await request({ messages: [{ role: 'system', content: 'Global system' }, { role: 'user', content: 'Hello' }], stream: true });
+    chunks = await Array.fromAsync(sseEvents(response.body));
+  } finally { globalThis.fetch = fetchOriginal; }
+  assert.ok(subscriptions >= 2, 'An empty event response is retried before inference');
   assert.equal(response.status, 200, JSON.stringify(chunks));
   assert.equal(chunks.some(c => c.error), false, JSON.stringify(chunks));
   assert.equal(chunks.map(c => c.choices[0]?.delta.content ?? '').join(''), '复用全局 OpenCode 登录。');

@@ -299,11 +299,29 @@ export class OpenCodeBridge {
       sessionID = session.id;
       eventController = new AbortController();
       const eventSignal = AbortSignal.any([combined, eventController.signal]);
-      const events = await fetch(base + '/event', { headers, signal: eventSignal });
-      if (!events.ok || !events.body) throw new ApiError('OpenCode event stream is unavailable.', 502);
+      phase = 'event subscription';
+      // Headers alone do not establish a usable SSE subscription. Confirm the
+      // initial event before inference, retrying empty connections without any
+      // supplier call. Retain the iterator so slow clients do not lose that read.
+      const connectTimeout = setTimeout(() => eventController.abort(new ApiError('OpenCode event subscription timed out.', 503, null, 'opencode_events')), this.config.startupTimeoutMs);
+      let iterator, initial;
+      try {
+        while (true) {
+          const response = await fetch(base + '/event', { headers, signal: eventSignal });
+          if (!response.ok || !response.body) throw new ApiError('OpenCode event stream is unavailable.', 502);
+          iterator = sseEvents(response.body);
+          initial = await iterator.next();
+          if (!initial.done) break;
+          await delay(100, eventSignal);
+        }
+      } finally { clearTimeout(connectTimeout); }
+      const events = (async function* () {
+        try { yield initial.value; yield* iterator; }
+        finally { await iterator.return(); }
+      })();
       phase = 'inference';
       await api(`/session/${sessionID}/prompt_async`, { ...(providerID ? { model: { providerID, modelID } } : {}), agent: 'bridge', parts: [{ type: 'text', text: 'Complete the current client request.' }] });
-      return { events: events.body, sessionID, cleanup, signal: combined, abort: () => api(`/session/${sessionID}/abort`, {}, AbortSignal.timeout(2000)),
+      return { events, sessionID, cleanup, signal: combined, abort: () => api(`/session/${sessionID}/abort`, {}, AbortSignal.timeout(2000)),
         diagnose: async details => { if (typeof this.config.onFailure === 'function') await this.config.onFailure({ phase, home, output: worker?.output ?? '', ...details }).catch(() => {}); },
       };
     } catch (error) {
@@ -369,7 +387,7 @@ export class OpenCodeBridge {
     let finished = false;
     try {
       yield chunk({ role: 'assistant', content: '' });
-      for await (const event of sseEvents(run.events)) {
+      for await (const event of run.events) {
         run.signal.throwIfAborted();
         const p = event.properties ?? {};
         if (typeof this.config.onFailure === 'function') {

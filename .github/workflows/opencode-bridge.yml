@@ -55,7 +55,7 @@ jobs:
         env:
           CGO_ENABLED: '0'
         run: |
-          test -z "$(gofmt -l internal/gateway/opencode_bridge_test.go)"
+          test -z "$(git show HEAD:internal/gateway/opencode_bridge_test.go | gofmt -d)"
           go vet -tags nogui ./...
           mkdir -p artifacts
           if [ "$RUNNER_OS" = Windows ]; then
