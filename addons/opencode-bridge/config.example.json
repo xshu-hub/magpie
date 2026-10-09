@@ -1,7 +1,7 @@
 {
   "mode": "global",
   "command": ["opencode"],
-  "maxConcurrent": 1,
+  "maxConcurrent": 0,
   "timeoutMs": 120000,
   "startupTimeoutMs": 30000
 }

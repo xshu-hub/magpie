@@ -1,7 +1,7 @@
 {
   "mode": "isolated",
   "command": ["./runtime/node_modules/opencode-ai/bin/opencode.exe"],
-  "maxConcurrent": 2,
+  "maxConcurrent": 0,
   "timeoutMs": 120000,
   "startupTimeoutMs": 30000,
   "models": {

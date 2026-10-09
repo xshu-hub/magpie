@@ -89,8 +89,12 @@ global, unmodified OpenCode installation with its existing
 configuration, login and authentication plugins. OpenCode owns upstream calls
 and persists token refreshes in its genuine auth store; the bridge does not
 implement supplier authentication. API workspaces and session databases remain
-temporary. Global mode serializes requests sharing login state and uses the
-standard SDK runtime. It reads the real OpenCode provider catalog to expose
+temporary. Concurrent requests use independent workers, sessions, MCP servers
+and cancellation signals. Both modes have no bridge concurrency limit by
+default (`maxConcurrent: 0`); a positive value explicitly opts into a limit.
+OpenCode and its authentication plugins own concurrent refresh behavior in
+the shared global login store. Global mode uses the standard SDK runtime.
+It reads the real OpenCode provider catalog to expose
 connected text models. With no addon
 config file, it selects global mode and the PATH executable automatically;
 explicit aliases remain supported and credential fields are never copied.

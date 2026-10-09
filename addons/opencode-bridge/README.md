@@ -1,6 +1,6 @@
 # Magpie OpenCode bridge
 
-0.4.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号**。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
+0.5.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号和并发请求数**。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
 
 请求方向：客户端 → Magpie → 插件 → 全局 OpenCode → 它配置的上游。也可运行独立的 OpenAI Chat HTTP 服务。
 
@@ -24,7 +24,7 @@ opencode models
 也可在解压目录用 CLI 安装：
 
 ```powershell
-tar -xzf xshu-hub-magpie-opencode-bridge-0.4.0.tgz
+tar -xzf xshu-hub-magpie-opencode-bridge-0.5.0.tgz
 .\magpie-cli-windows-amd64.exe plugin add .\package
 .\magpie-cli-windows-amd64.exe plugin login opencode-bridge
 .\magpie-cli-windows-amd64.exe serve
@@ -38,7 +38,7 @@ tar -xzf xshu-hub-magpie-opencode-bridge-0.4.0.tgz
 {
   "mode": "global",
   "command": ["opencode"],
-  "maxConcurrent": 1,
+  "maxConcurrent": 0,
   "timeoutMs": 120000,
   "startupTimeoutMs": 30000
 }
@@ -96,7 +96,9 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 
 内置工具和其他 MCP 服务在这个 API worker 内禁用。客户端函数以 MCP 形式注册；调用时只返回“交由客户端执行”的内部确认，不执行函数。标准 SDK 完成整批调用后发布 `step-finish`。公开的消息 hook 阻止下一轮模型推理，网关据该事件返回工具调用并取消 worker；该内部确认不会发送给客户端，也不会被用于下一次供应商推理。下一次请求重新注入完整历史和客户端的真实结果。
 
-共享登录文件可能发生并发刷新，所以全局模式仅允许一个活动请求，满时返回 429。其他同时运行的 OpenCode 实例仍可能共享这个文件，其并发写入行为由 OpenCode 本身决定。
+默认不限制并发，每个请求使用独立的 OpenCode 进程、工作目录、会话数据库、MCP 服务和取消信号。取消一个请求只清理该请求的 worker。`maxConcurrent` 省略或设为 `0` 均表示不限；只有显式设置正整数时才限制活动请求数，满时返回 429。升级已有配置时，把旧的 `maxConcurrent: 1` 删除或改为 `0`。
+
+全局登录与认证插件仍由各 OpenCode worker 复用；共享登录文件的并发刷新行为由 OpenCode 及供应商认证插件决定。并发验收覆盖已存 API Key 和已刷新的 OAuth 登录，不保证每个第三方插件在同一时刻刷新凭证的行为。
 
 ## 兼容范围与差异
 
@@ -148,4 +150,4 @@ TEST_OPENCODE_COMMAND='["/absolute/path/to/opencode"]' \
   go test -tags nogui -count=1 -timeout 4m ./internal/gateway -run '^TestOpenCodeV1Bridge$'
 ```
 
-测试全部使用临时 HOME 和 loopback fixture，不接触真实登录。GitHub workflow 在 Windows/Linux 上分别验证 1.16.2 和 1.18.35，构建两种平台产物；Linux 运行完整 nogui Go suite。测试其他版本时可用 `TEST_OPENCODE_PLUGIN_DIR` 指定测试安装中的真实 SDK 目录，`TEST_OPENCODE_VERSION` 用于核验版本响应头；这些变量没有运行版本白名单。
+测试全部使用临时 HOME 和 loopback fixture，不接触真实登录。并发测试让四个真实 OpenCode worker 的上游请求同时保持活动，验证混合流式/非流式结果隔离、复用登录和独立取消。GitHub workflow 在 Windows/Linux 上分别验证 1.16.2 和 1.18.35，构建两种平台产物；Linux 运行完整 nogui Go suite。测试其他版本时可用 `TEST_OPENCODE_PLUGIN_DIR` 指定测试安装中的真实 SDK 目录，`TEST_OPENCODE_VERSION` 用于核验版本响应头；这些变量没有运行版本白名单。

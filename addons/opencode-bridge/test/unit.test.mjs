@@ -4,16 +4,18 @@ import { validateRequest, toNativeHistory, nativeToolName, usageOf, sseEvents } 
 import { normalizeConfig } from '../lib/bridge.mjs';
 const models = { test: { output: 100 } };
 const base = () => ({ model: 'test', messages: [{ role: 'user', content: 'Hello' }] });
-test('global mode needs no supplier configuration or upstream key and serializes shared auth', () => {
+test('global mode needs no supplier configuration or upstream key and defaults to unlimited concurrency', () => {
   const config = normalizeConfig({ mode: 'global' });
   assert.deepEqual(config.command, ['opencode']);
-  assert.equal(config.maxConcurrent, 1);
+  assert.equal(config.maxConcurrent, 0);
+  assert.equal(normalizeConfig({ mode: 'global', maxConcurrent: 0 }).maxConcurrent, 0);
+  assert.equal(normalizeConfig({ mode: 'global', maxConcurrent: 4 }).maxConcurrent, 4);
+  for (const maxConcurrent of [-1, 1.5, '4', Infinity]) assert.throws(() => normalizeConfig({ mode: 'global', maxConcurrent }), /maxConcurrent/);
   assert.equal(config.discoverModels, true);
   assert.equal(normalizeConfig({ mode: 'global', models: { selected: { model: 'provider/model', context: 1, output: 1 } } }).discoverModels, false);
   assert.throws(() => normalizeConfig({ mode: 'global', discoverModels: 'yes' }), /discoverModels/);
   assert.deepEqual(Object.keys(config.models), ['oc-default']);
   assert.equal(config.models['oc-default'].model, undefined);
-  assert.throws(() => normalizeConfig({ mode: 'global', maxConcurrent: 2 }), /shared|shares/);
   assert.throws(() => normalizeConfig({ mode: 'global', models: { test: { baseURL: 'https://api.example/v1', context: 1, output: 1 } } }), /credentials/);
   assert.throws(() => normalizeConfig({ mode: 'global', models: { test: { model: 'missing-provider', context: 1, output: 1 } } }), /provider\/model/);
 });

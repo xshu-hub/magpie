@@ -39,10 +39,10 @@ export function normalizeConfig(input, directory = process.cwd()) {
     }
     for (const key of ['context', 'output']) if (!Number.isInteger(model[key]) || model[key] <= 0) throw new ApiError('Each model needs positive integer context and output limits.', 500);
   }
-  const config = { ...input, mode, command: [...command], models, discoverModels: input.discoverModels ?? (mode === 'global' && input.models === undefined), maxConcurrent: input.maxConcurrent ?? (mode === 'global' ? 1 : 2), timeoutMs: input.timeoutMs ?? 120000, startupTimeoutMs: input.startupTimeoutMs ?? 30000 };
+  const config = { ...input, mode, command: [...command], models, discoverModels: input.discoverModels ?? (mode === 'global' && input.models === undefined), maxConcurrent: input.maxConcurrent ?? 0, timeoutMs: input.timeoutMs ?? 120000, startupTimeoutMs: input.startupTimeoutMs ?? 30000 };
   if (typeof config.discoverModels !== 'boolean' || (config.discoverModels && mode !== 'global')) throw new ApiError('discoverModels must be a boolean and is available only in global mode.', 500);
-  for (const key of ['maxConcurrent', 'timeoutMs', 'startupTimeoutMs']) if (!Number.isInteger(config[key]) || config[key] <= 0) throw new ApiError(`${key} must be a positive integer.`, 500);
-  if (mode === 'global' && config.maxConcurrent !== 1) throw new ApiError('Global mode requires maxConcurrent=1 because OpenCode shares its login and refresh state.', 500);
+  if (!Number.isSafeInteger(config.maxConcurrent) || config.maxConcurrent < 0) throw new ApiError('maxConcurrent must be a nonnegative integer; 0 means unlimited.', 500);
+  for (const key of ['timeoutMs', 'startupTimeoutMs']) if (!Number.isInteger(config[key]) || config[key] <= 0) throw new ApiError(`${key} must be a positive integer.`, 500);
   return config;
 }
 
@@ -221,7 +221,7 @@ function mcpServer(body, token) {
       let result;
       switch (rpc.method) {
         case 'initialize':
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.4.0' } };
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.5.0' } };
           break;
         case 'ping': result = {}; break;
         case 'tools/list':
@@ -265,7 +265,7 @@ export class OpenCodeBridge {
     await this.loadModels();
     validateRequest(body, this.config.models);
     signal?.throwIfAborted();
-    if (this.active >= this.config.maxConcurrent) throw new ApiError('All OpenCode workers are busy. Retry later.', 429, null, 'worker_busy');
+    if (this.config.maxConcurrent > 0 && this.active >= this.config.maxConcurrent) throw new ApiError('All OpenCode workers are busy. Retry later.', 429, null, 'worker_busy');
     const model = this.config.models[body.model];
     const global = this.config.mode === 'global';
     const upstreamKey = model.apiKeyEnv ? process.env[model.apiKeyEnv] : apiKey;

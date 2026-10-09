@@ -44,6 +44,8 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 	t.Setenv("MAGPIE_BUN", bun)
 	t.Cleanup(plugin.Settle)
 	var calls atomic.Int32
+	var concurrentCalls atomic.Int32
+	concurrentRelease := make(chan struct{})
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		body, _ := io.ReadAll(r.Body)
@@ -55,14 +57,26 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 			Tools []struct {
 				Function struct{ Name string }
 			}
-			Messages []struct{ Role string }
+			Messages []struct{ Role, Content string }
 		}
 		if err := json.Unmarshal(body, &input); err != nil {
 			t.Error(err)
 		}
 		hasResult := false
+		content := "Through real OpenCode v1"
 		for _, msg := range input.Messages {
 			hasResult = hasResult || msg.Role == "tool"
+			if strings.HasPrefix(msg.Content, "gateway sentinel parallel ") {
+				content = msg.Content
+				if concurrentCalls.Add(1) == 4 {
+					close(concurrentRelease)
+				}
+				select {
+				case <-concurrentRelease:
+				case <-r.Context().Done():
+					return
+				}
+			}
 		}
 		if len(input.Tools) > 0 && !hasResult {
 			name, _ := json.Marshal(input.Tools[0].Function.Name)
@@ -70,7 +84,8 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 			fmt.Fprint(w, "data: "+`{"id":"fixture","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`+"\n\ndata: [DONE]\n\n")
 			return
 		}
-		fmt.Fprint(w, "data: "+`{"id":"fixture","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{"role":"assistant","content":"Through real OpenCode v1"},"finish_reason":null}]}`+"\n\n")
+		text, _ := json.Marshal(content)
+		fmt.Fprint(w, "data: "+`{"id":"fixture","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{"role":"assistant","content":`+string(text)+`},"finish_reason":null}]}`+"\n\n")
 		fmt.Fprint(w, "data: "+`{"id":"fixture","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`+"\n\ndata: [DONE]\n\n")
 	}))
 	defer up.Close()
@@ -229,5 +244,52 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 	}
 	if calls.Load() != 4 {
 		t.Fatalf("four client requests caused %d upstream inferences", calls.Load())
+	}
+	// All four upstream calls must be active before the fixture releases any
+	// output. This exercises concurrency through the real Bun host and gateway.
+	parallelCtx, parallelCancel := context.WithTimeout(ctx, 45*time.Second)
+	defer parallelCancel()
+	results := make(chan error, 4)
+	for i := range 4 {
+		go func() {
+			marker := fmt.Sprintf("gateway sentinel parallel %d", i)
+			model := "opencode-bridge/oc-mock"
+			if global {
+				model = "opencode-bridge/fixture-global/mock"
+			}
+			body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%t}`, model, marker, i%2 == 0)
+			req, err := http.NewRequestWithContext(parallelCtx, http.MethodPost, gw.URL+"/v1/chat/completions", strings.NewReader(body))
+			if err != nil {
+				results <- err
+				return
+			}
+			req.Header.Set("Authorization", "Bearer fixture-client")
+			req.Header.Set("Content-Type", "application/json")
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				results <- err
+				return
+			}
+			reply, err := io.ReadAll(res.Body)
+			res.Body.Close()
+			if err != nil {
+				results <- err
+				return
+			}
+			if res.StatusCode != http.StatusOK || !strings.Contains(string(reply), marker) {
+				results <- fmt.Errorf("concurrent request %d: HTTP %d %s", i, res.StatusCode, reply)
+				return
+			}
+			results <- nil
+		}()
+	}
+	for range 4 {
+		if err := <-results; err != nil {
+			parallelCancel()
+			t.Error(err)
+		}
+	}
+	if calls.Load() != 8 || concurrentCalls.Load() != 4 {
+		t.Errorf("eight client requests caused %d upstream inferences, %d concurrent", calls.Load(), concurrentCalls.Load())
 	}
 }

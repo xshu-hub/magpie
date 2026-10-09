@@ -19,6 +19,7 @@ const configDir = path.join(home, 'config', 'opencode');
 const authFile = path.join(data, 'auth.json');
 const requests = [];
 let refreshes = 0;
+let parallelRequests;
 const upstream = http.createServer(async (req, res) => {
   if (req.url === '/refresh') {
     refreshes++;
@@ -29,11 +30,21 @@ const upstream = http.createServer(async (req, res) => {
   let raw = ''; for await (const chunk of req) raw += chunk;
   const body = JSON.parse(raw);
   requests.push({ auth: req.headers.authorization, body });
+  const marker = body.messages.find(m => m.role === 'user' && typeof m.content === 'string' && parallelRequests?.has(m.content))?.content;
+  if (marker) {
+    const pending = parallelRequests.get(marker);
+    pending.started.resolve();
+    await pending.release.promise;
+    if (res.destroyed) return;
+  }
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   const emit = (delta, reason = null, usage) => res.write(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'mock', choices: [{ index: 0, delta, finish_reason: reason }], ...(usage ? { usage } : {}) })}\n\n`);
   if (body.tools?.length && !body.messages.some(m => m.role === 'tool')) {
     for (const [i, name] of ['weather', 'clock'].entries()) emit({ tool_calls: [{ index: i, id: 'call_' + name, type: 'function', function: { name: nativeToolName(name), arguments: '{"city":"北京"}' } }] });
     emit({}, 'tool_calls', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  } else if (marker) {
+    emit({ role: 'assistant', content: marker });
+    emit({}, 'stop', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
   } else {
     emit({ role: 'assistant', content: '复用' }); emit({ content: '全局 OpenCode 登录。' });
     emit({}, 'stop', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
@@ -232,4 +243,62 @@ test('a plugin with no config.json uses global OpenCode and discovers its models
   assert.ok(cfg.provider['opencode-bridge'].models['fixture-oauth/mock']);
   assert.equal(plugin.auth.methods[0].type, 'oauth');
   await assert.rejects(() => OpenCodeBridgePlugin({}, { configFile: path.join(home, 'missing-explicit-config.json') }), { code: 'ENOENT' });
+});
+
+test('global workers infer concurrently and cancelling one does not cancel the other sessions', { timeout: 90000 }, async () => {
+  const instance = new OpenCodeBridge({ ...options, models: {
+    ...options.models,
+    'saved-api': { model: 'fixture-api/mock', context: 100000, output: 1000 },
+  } });
+  const labels = ['parallel-cancel', 'parallel-json', 'parallel-stream', 'parallel-oauth'];
+  parallelRequests = new Map(labels.map(label => [label, { started: Promise.withResolvers(), release: Promise.withResolvers() }]));
+  const controllers = labels.map(() => new AbortController());
+  const before = requests.length;
+  const jobs = labels.map(async (label, i) => {
+    const body = { model: i % 2 ? 'saved-api' : 'oc-default', messages: [{ role: 'user', content: label }], stream: i % 2 === 0, stream_options: { include_usage: true } };
+    const response = await instance.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify(body), signal: controllers[i].signal }, 'not-the-upstream-key');
+    assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
+    if (!body.stream) {
+      const result = await response.json();
+      return { content: result.choices[0].message.content, finish: result.choices[0].finish_reason, usage: result.usage };
+    }
+    const chunks = await Array.fromAsync(sseEvents(response.body));
+    if (i === 0 && controllers[0].signal.aborted) return { cancelled: true };
+    assert.equal(chunks.some(c => c.error), false, JSON.stringify(chunks));
+    return { content: chunks.map(c => c.choices[0]?.delta.content ?? '').join(''), finish: chunks.find(c => c.choices[0]?.finish_reason)?.choices[0].finish_reason, usage: chunks.at(-1).usage };
+  });
+  const settled = Promise.allSettled(jobs);
+  let deadline;
+  try {
+    const started = Promise.all([...parallelRequests.values()].map(p => p.started.promise));
+    const earlyFailure = Promise.all(jobs).then(() => { throw new Error('Workers completed before all four upstream calls overlapped'); });
+    const timedOut = new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('All four global workers must reach inference concurrently')), 45000); });
+    await Promise.race([started, earlyFailure, timedOut]);
+    assert.equal(requests.length, before + 4, 'All four inferences start before any result is released');
+    for (const [i, label] of labels.entries()) {
+      const upstreamRequest = requests.slice(before).find(r => r.body.messages.some(m => m.content === label));
+      assert.ok(upstreamRequest, label);
+      assert.equal(upstreamRequest.auth, i % 2 ? 'Bearer fixture-saved-api-key' : 'Bearer fixture-refreshed-access');
+    }
+    controllers[0].abort();
+    await jobs[0];
+    for (const label of labels) parallelRequests.get(label).release.resolve();
+    const results = await Promise.all(jobs);
+    for (let i = 1; i < results.length; i++) {
+      assert.equal(results[i].content, labels[i], 'Sessions must not receive another request\'s response');
+      assert.equal(results[i].finish, 'stop');
+      assert.equal(results[i].usage.total_tokens, 15);
+    }
+    assert.equal(refreshes, 1, 'Concurrent workers reuse the login already refreshed by OpenCode');
+    assert.equal(await readFile(path.join(configDir, 'opencode.json'), 'utf8'), originalConfig);
+    const auth = JSON.parse(await readFile(authFile, 'utf8'));
+    assert.equal(auth.untouched.key, 'fixture-unrelated-key');
+    assert.equal((await readdir(data)).some(n => n.endsWith('.sqlite')), false);
+  } finally {
+    clearTimeout(deadline);
+    for (const controller of controllers) controller.abort();
+    for (const pending of parallelRequests.values()) pending.release.resolve();
+    await settled;
+    parallelRequests = undefined;
+  }
 });
