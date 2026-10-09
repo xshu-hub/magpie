@@ -146,7 +146,16 @@ func testOpenCodeV1Bridge(t *testing.T, global bool) {
 	t.Setenv("MAGPIE_OPENCODE_CONFIG", file)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	// A previous test may leave a provider cache. Installation invalidates it
+	// asynchronously, as it does when adding a plugin to a running Magpie.
+	plugin.UseCached([]plugin.Provider{})
+	t.Cleanup(func() { plugin.UseCached(nil) })
 	if _, err := plugin.Add(ctx, addon); err != nil {
+		t.Fatal(err)
+	}
+	// Wait for the real host's model registration before signing in or asking
+	// the gateway. Cached() may serve the prior list while it refreshes.
+	if _, err := plugin.Providers(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if global {
