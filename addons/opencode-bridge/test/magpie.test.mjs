@@ -117,14 +117,14 @@ test('packaged addon on official Magpie supports cwd, tools, SSE and independent
         const response = await fetch(base + '/models', { headers, signal: AbortSignal.timeout(1000) });
         if (response.ok) {
           models = await response.json();
-          if (models.data.some(m => m.id === 'opencode-bridge/fixture/' + modelID)) break;
+          if (models.data.some(m => m.id === 'opencode-bridge/' + modelID)) break;
         }
       } catch {}
       await delay(100);
     }
-    assert.ok(models?.data.some(m => m.id === 'opencode-bridge/fixture/' + modelID), serverLogs);
+    assert.ok(models?.data.some(m => m.id === 'opencode-bridge/' + modelID), serverLogs);
     const ask = async body => {
-      const response = await fetch(base + '/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: 'opencode-bridge/fixture/' + modelID, ...body }), signal: AbortSignal.timeout(60000) });
+      const response = await fetch(base + '/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: 'opencode-bridge/' + modelID, ...body }), signal: AbortSignal.timeout(60000) });
       assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
       return body.stream ? Array.fromAsync(sseEvents(response.body)) : response.json();
     };
@@ -133,6 +133,9 @@ test('packaged addon on official Magpie supports cwd, tools, SSE and independent
     assert.equal(ordinary.choices[0].message.content, 'Through official Magpie and real OpenCode.');
     const stream = await ask({ messages, stream: true, reasoning_effort: 'low' });
     assert.equal(stream.map(c => c.choices?.[0]?.delta.content ?? '').join(''), ordinary.choices[0].message.content);
+    const legacy = await ask({ model: 'opencode-bridge/fixture/' + modelID, messages });
+    assert.equal(legacy.choices[0].message.content, ordinary.choices[0].message.content);
+    assert.ok(!models.data.some(m => m.id === 'opencode-bridge/fixture/' + modelID));
     const tools = [{ type: 'function', function: { name: 'weather', parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false } } }];
     const tool = await ask({ messages, tools, reasoning_effort: 'high' });
     assert.equal(tool.choices[0].finish_reason, 'tool_calls');
@@ -148,8 +151,8 @@ test('packaged addon on official Magpie supports cwd, tools, SSE and independent
     });
     await Promise.all(running);
     assert.equal(pending.size, 4, 'All four inferences overlap before any receives output');
-    assert.equal(calls, 8, 'Every request causes exactly one real OpenCode inference');
-    assert.deepEqual(upstreamEfforts.slice(0, 4).map(r => r.effort), ['high', 'low', 'high', 'low']);
+    assert.equal(calls, 9, 'Every request causes exactly one real OpenCode inference');
+    assert.deepEqual(upstreamEfforts.slice(0, 5).map(r => r.effort), ['high', 'low', 'xhigh', 'high', 'low']);
     for (const [i, effort] of ['none', 'low', 'high', 'max'].entries()) assert.equal(upstreamEfforts.find(r => r.marker === 'parallel-' + i)?.effort, effort, 'Concurrent requests must not inherit another request\'s effort');
     const records = (await readFile(recordsFile, 'utf8')).trim().split('\n').map(JSON.parse);
     const databases = new Set(records.map(r => r.db));
@@ -162,7 +165,7 @@ test('packaged addon on official Magpie supports cwd, tools, SSE and independent
     assert.equal(await readFile(path.join(workspace, 'keep.txt'), 'utf8'), 'user-owned workspace');
     assert.equal(await readFile(path.join(workspace, 'opencode.json'), 'utf8'), '{"model":"project-must-not-load/missing"}');
     assert.equal(await readFile(path.join(configDir, 'opencode.json'), 'utf8'), config);
-    const report = { addonVersion: pkg.version, magpieVersion, officialMagpieUnmodified: true, officialMagpieSHA256: await hash(executable), addonSHA256: await hash(process.env.TEST_BRIDGE_PACKAGE), opencodeVersion: process.env.TEST_OPENCODE_VERSION, upstream: 'loopback fixture with saved global API key', modelsDiscovered: true, ordinaryResponse: true, streaming: true, toolsAndContinuation: true, concurrentRequests: 4, reasoningEffortsForwarded: true, explicitEffortOverridesDefault: true, concurrentEffortIsolation: true, independentDatabases: databases.size, actualDirectoryObservedByOpenCodePlugin: true, existingWorkspaceFilesPreserved: true, projectConfigDisabled: true, userGlobalConfigurationUntouched: true, passed: true };
+    const report = { addonVersion: pkg.version, magpieVersion, officialMagpieUnmodified: true, officialMagpieSHA256: await hash(executable), addonSHA256: await hash(process.env.TEST_BRIDGE_PACKAGE), opencodeVersion: process.env.TEST_OPENCODE_VERSION, upstream: 'loopback fixture with saved global API key', modelsDiscovered: true, shortModelIDs: true, legacyQualifiedIDAccepted: true, ordinaryResponse: true, streaming: true, toolsAndContinuation: true, concurrentRequests: 4, reasoningEffortsForwarded: true, explicitEffortOverridesDefault: true, concurrentEffortIsolation: true, independentDatabases: databases.size, actualDirectoryObservedByOpenCodePlugin: true, existingWorkspaceFilesPreserved: true, projectConfigDisabled: true, userGlobalConfigurationUntouched: true, passed: true };
     if (process.env.TEST_MAGPIE_REPORT) await writeFile(process.env.TEST_MAGPIE_REPORT, JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report));
   } finally {

@@ -59,7 +59,17 @@ const upstream = http.createServer(async (req, res) => {
   }
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   const emit = (delta, reason = null, usage) => res.write(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'mock', choices: [{ index: 0, delta, finish_reason: reason }], ...(usage ? { usage } : {}) })}\n\n`);
-  if (body.tools?.length && !body.messages.some(m => m.role === 'tool')) {
+  if (body.messages.some(m => m.role === 'user' && m.content === 'AUDIT_LOCAL_TOOL')) {
+    emit({tool_calls:[{index:0,id:'audit_local',type:'function',function:{name:'bridge_audit_local',arguments:'{}'}}]});
+    emit({},'tool_calls',{prompt_tokens:10,completion_tokens:5,total_tokens:15});
+  } else if (body.messages.some(m => m.role === 'user' && ['AUDIT_FILTER', 'AUDIT_FILTER_TEXT'].includes(m.content))) {
+    if (body.messages.some(m => m.content === 'AUDIT_FILTER_TEXT')) emit({ content: 'Before filtering.' });
+    emit({},'content_filter',{prompt_tokens:10,completion_tokens:0,total_tokens:10});
+  } else if (body.messages.some(m => m.role === 'user' && m.content === 'AUDIT_REASONING')) {
+    emit({role:'assistant',reasoning_content:'思考中。'});
+    emit({content:'结论。'});
+    emit({},'stop',{prompt_tokens:100,completion_tokens:30,total_tokens:130,prompt_tokens_details:{cached_tokens:20},completion_tokens_details:{reasoning_tokens:10}});
+  } else if (body.tools?.length && !body.messages.some(m => m.role === 'tool')) {
     for (const [i, name] of ['weather', 'clock'].entries()) emit({ tool_calls: [{ index: i, id: 'call_' + name, type: 'function', function: { name: nativeToolName(name), arguments: '{"city":"北京"}' } }] });
     emit({}, 'tool_calls', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
   } else if (body.messages.some(m => m.role === 'user' && m.content === 'HOLD_AFTER_FIRST_OUTPUT')) {
@@ -309,7 +319,7 @@ test('reasoning_effort on the reported custom DeepSeek name reaches upstream and
 test('native OpenCode variants are applied and only public reasoning metadata is advertised', { timeout: 60000 }, async () => {
   const discovered = new OpenCodeBridge({ ...options, discoverModels: true });
   await discovered.loadModels();
-  const model = discovered.config.models['fixture-api/native-variants'];
+  const model = discovered.config.models['native-variants'];
   assert.equal(model.reasoning, true);
   assert.deepEqual(model.reasoningEfforts.sort(), ['high', 'low', 'max', 'medium']);
   assert.equal(JSON.stringify(discovered.config.models).includes('must-not-enter-metadata'), false);
@@ -322,11 +332,11 @@ test('native OpenCode variants are applied and only public reasoning metadata is
   const plugin = await OpenCodeBridgePlugin({}, { configFile: file });
   const cfg = {};
   await plugin.config(cfg);
-  assert.equal(cfg.provider['opencode-bridge'].models['fixture-api/native-variants'].reasoning, true);
-  assert.ok(cfg.provider['opencode-bridge'].models['fixture-api/native-variants'].variants.high);
+  assert.equal(cfg.provider['opencode-bridge'].models['native-variants'].reasoning, true);
+  assert.ok(cfg.provider['opencode-bridge'].models['native-variants'].variants.high);
   const metadata = await plugin.provider.models({ models: {} });
-  assert.equal(metadata['fixture-api/native-variants'].capabilities.reasoning, true);
-  assert.deepEqual(metadata['fixture-api/native-variants'].variants.high, {});
+  assert.equal(metadata['native-variants'].capabilities.reasoning, true);
+  assert.deepEqual(metadata['native-variants'].variants.high, {});
   assert.equal(JSON.stringify(metadata).includes('must-not-enter-metadata'), false);
 });
 
@@ -508,5 +518,100 @@ test('global workers share a configured directory while concurrent inference and
     for (const pending of parallelRequests.values()) pending.release.resolve();
     await settled;
     parallelRequests = undefined;
+  }
+});
+
+test('regression: stream reasoning, text and usage with nonzero reasoning/cache totals', { timeout:60000 }, async () => {
+  const response=await request({messages:[{role:'user',content:'AUDIT_REASONING'}],stream:true,stream_options:{include_usage:true}});
+  assert.equal(response.status,200);
+  const chunks=await Array.fromAsync(sseEvents(response.body));
+  assert.equal(chunks.map(x=>x.choices?.[0]?.delta?.reasoning_content??'').join(''),'思考中。');
+  assert.equal(chunks.map(x=>x.choices?.[0]?.delta?.content??'').join(''),'结论。');
+  assert.equal(chunks.at(-1).usage.total_tokens,130);
+  assert.equal(chunks.at(-1).usage.completion_tokens,30);
+});
+
+test('regression: content_filter preserves normal JSON and SSE endings, with or without preceding text', { timeout: 60000 }, async () => {
+  for (const content of ['AUDIT_FILTER', 'AUDIT_FILTER_TEXT']) for (const stream of [false, true]) {
+    const response = await request({ messages: [{ role: 'user', content }], stream });
+    assert.equal(response.status, 200);
+    if (stream) {
+      const chunks = await Array.fromAsync(sseEvents(response.body));
+      assert.equal(chunks.some(c => c.error), false);
+      assert.equal(chunks.at(-1).choices[0].finish_reason, 'content_filter');
+      assert.equal(chunks.map(c => c.choices[0]?.delta.content ?? '').join(''), content.endsWith('_TEXT') ? 'Before filtering.' : '');
+    } else {
+      const result = await response.json();
+      assert.equal(result.choices[0].finish_reason, 'content_filter');
+    }
+  }
+});
+
+test('regression: environment-only global provider discovered must remain usable for inference', {timeout:60000},async()=>{
+  const old=process.env.OPENCODE_CONFIG_CONTENT;
+  process.env.OPENCODE_CONFIG_CONTENT=JSON.stringify({provider:{'audit-env':{npm:'@ai-sdk/openai-compatible',options:{baseURL:baseURL+'/v1',apiKey:'audit-fixture-key'},models:{mock:{limit:{context:100000,output:1000}}}}}});
+  try {
+    const bridge=new OpenCodeBridge({mode:'global',command,timeoutMs:15000,startupTimeoutMs:10000});
+    await bridge.loadModels();
+    assert.ok(bridge.config.models['audit-env/mock'],'environment-only provider is discovered');
+    const before=requests.length;
+    const response=await bridge.fetch('http://bridge/v1/chat/completions',{method:'POST',body:JSON.stringify({model:'audit-env/mock',messages:[{role:'user',content:'Hello'}]})});
+    const result=await response.json();
+
+    assert.equal(response.status, 200, JSON.stringify(result));
+    assert.equal(requests.length, before + 1);
+    assert.equal(requests.at(-1).auth, 'Bearer audit-fixture-key');
+  } finally {if(old===undefined)delete process.env.OPENCODE_CONFIG_CONTENT; else process.env.OPENCODE_CONFIG_CONTENT=old;}
+});
+
+test('regression: actual output limits return named client errors for both token fields and preserve valid boundaries', { timeout: 90000 }, async () => {
+  const instance = new OpenCodeBridge({ ...options, onFailure: undefined, models: { test: { model: 'fixture-api/mock', context: 100000, output: 10000 } } });
+  for (const field of ['max_tokens', 'max_completion_tokens']) for (const value of [999, 1000, 1001]) {
+    const before = requests.length;
+    const response = await instance.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'test', [field]: value, messages: [{ role: 'user', content: 'Hello' }] }) });
+    const result = await response.json();
+    assert.equal(response.status, value > 1000 ? 400 : 200, JSON.stringify(result));
+    if (value > 1000) {
+      assert.equal(result.error.param, field);
+      assert.equal(requests.length, before, 'Invalid output limits must not start upstream inference');
+    } else assert.equal(requests.at(-1).body.max_tokens, value);
+    assert.equal(instance.active, 0);
+  }
+});
+
+test('regression: allowed-prefix global local tool must not execute for API clients', {timeout:60000},async()=>{
+  const sentinel=path.join(home,'local-tool-executed.txt');
+  const customPlugin=path.join(configDir,'audit-local.mjs');
+  await writeFile(customPlugin,`import {writeFile} from 'node:fs/promises';
+export const AuditLocal=async()=>({tool:{bridge_audit_local:{description:'Audit fixture local tool',args:{},execute:async()=>{await writeFile(${JSON.stringify(sentinel)},'executed'); return 'local operation';}}}});`);
+  const modified={...globalConfig,plugin:[...globalConfig.plugin,pathToFileURL(customPlugin).href]};
+  await writeFile(path.join(configDir,'opencode.json'),JSON.stringify(modified));
+  try {
+    const tools = ['weather', 'clock'].map(name => ({ type: 'function', function: { name, parameters: { type: 'object', properties: {} } } }));
+    const instance = new OpenCodeBridge({ ...options, onFailure: undefined });
+    for (const extra of [{}, { tools, tool_choice: 'none' }, { tools }]) {
+      const response = await request({ messages: [{ role: 'user', content: 'AUDIT_LOCAL_TOOL' }], ...extra }, instance);
+      await response.json();
+      await delay(100);
+      assert.equal(await stat(sentinel).then(() => true, () => false), false, 'An unregistered local function was executed');
+      assert.ok(!requests.at(-1).body.tools?.some(t => t.function.name === 'bridge_audit_local'), 'Local tool must not be advertised');
+    }
+  } finally {await writeFile(path.join(configDir,'opencode.json'),originalConfig);}
+});
+
+test('short discovery IDs and legacy qualified IDs invoke the same real upstream', {timeout:60000}, async()=>{
+  const bridge=new OpenCodeBridge({...options,discoverModels:true});
+  await bridge.loadModels();
+  const id='DeepSeek-V4.1-Flash-line2-maas';
+  assert.ok(bridge.models().data.some(m=>m.id===id));
+  assert.ok(!bridge.models().data.some(m=>m.id==='fixture-api/'+id));
+  assert.ok(bridge.models().data.some(m=>m.id==='fixture-api/mock'));
+  assert.ok(bridge.models().data.some(m=>m.id==='fixture-oauth/mock'));
+  assert.ok(!bridge.models().data.some(m=>m.id==='mock'));
+  for(const model of [id,'fixture-api/'+id]){
+    const response=await bridge.fetch('http://bridge/v1/chat/completions',{method:'POST',body:JSON.stringify({model,messages:[{role:'user',content:'Hello'}]})});
+    assert.equal(response.status,200,JSON.stringify(await response.json()));
+    assert.equal(requests.at(-1).body.model,id);
+    assert.equal(requests.at(-1).auth,'Bearer fixture-saved-api-key');
   }
 });

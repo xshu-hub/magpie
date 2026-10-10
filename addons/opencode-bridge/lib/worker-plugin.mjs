@@ -1,5 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import { toNativeHistory } from './protocol.mjs';
+import { ApiError, clientToolNames, toolPermissions, toNativeHistory } from './protocol.mjs';
 import { applyReasoning } from './reasoning.mjs';
 
 // This is loaded through OpenCode's public plugin config, without patching OpenCode.
@@ -11,7 +11,7 @@ export const BridgeWorker = async ({ directory }) => {
     config: async cfg => {
       // The final public plugin hook limits only this transient API worker.
       // Existing provider configuration and auth hooks remain intact.
-      const permission = { '*': 'deny', 'bridge_*': 'allow' };
+      const permission = toolPermissions((await get()).body);
       cfg.permission = permission;
       cfg.agent ??= {};
       cfg.agent.bridge = { mode: 'primary', prompt: 'Follow the client instructions.', permission };
@@ -20,6 +20,9 @@ export const BridgeWorker = async ({ directory }) => {
       cfg.autoupdate = false;
       cfg.share = 'disabled';
       for (const name of Object.keys(cfg.mcp ?? {})) if (name !== 'bridge') cfg.mcp[name] = { ...cfg.mcp[name], enabled: false };
+    },
+    'tool.execute.before': async ({ tool }) => {
+      if (!clientToolNames((await get()).body).includes(tool)) throw new ApiError('OpenCode attempted an unregistered local tool.', 502, null, 'unregistered_tool');
     },
     'experimental.chat.messages.transform': async (_, output) => {
       const r = await get();
@@ -42,13 +45,13 @@ export const BridgeWorker = async ({ directory }) => {
       output.temperature = body.temperature;
       output.topP = body.top_p;
       output.topK = undefined;
-      const requested = body.max_completion_tokens ?? body.max_tokens;
-      if (requested !== undefined && input.model.limit.output > 0 && requested > input.model.limit.output) throw new Error('Requested output tokens exceed the OpenCode model limit.');
-      output.maxOutputTokens = requested ?? Math.min(outputLimit, input.model.limit.output || outputLimit);
       try {
+        const requested = body.max_completion_tokens ?? body.max_tokens;
+        if (requested !== undefined && input.model.limit.output > 0 && requested > input.model.limit.output) throw new ApiError('Requested output tokens exceed the OpenCode model limit.', 400, body.max_completion_tokens !== undefined ? 'max_completion_tokens' : 'max_tokens');
+        output.maxOutputTokens = requested ?? Math.min(outputLimit, input.model.limit.output || outputLimit);
         output.options = applyReasoning(input.model, output.options, body.reasoning_effort);
       } catch (error) {
-        if (error.param === 'reasoning_effort') await writeFile(hookFile, JSON.stringify({ error: { status: error.status, ...error.body().error } }), { mode: 0o600 });
+        if (error instanceof ApiError) await writeFile(hookFile, JSON.stringify({ error: { status: error.status, ...error.body().error } }), { mode: 0o600 });
         throw error;
       }
       await writeFile(hookFile, JSON.stringify({ history: true, params: true }), { mode: 0o600 });

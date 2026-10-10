@@ -165,3 +165,16 @@ Run the relevant package tests with an isolated home directory. Resolve GOPATH a
 ```
 
 Some migration and gateway plugin tests require Bun on PATH and use local plugin fixtures; they skip when Bun is unavailable. Report any skipped tests and verify the community package separately when its implementation changes.
+
+The bridge addon defaults to short catalog IDs for models unique across connected
+providers. Duplicate names, names that could shadow qualified IDs, and configured
+aliases retain unambiguous routing; original qualified IDs remain accepted without
+duplicating them in the catalog. `modelIdStyle: "qualified"` restores the long
+listing. Magpie keeps its own provider prefix. Both plugin model hooks and the
+standalone list use the same catalog; inference resolves either spelling to the
+original OpenCode provider/model. The official binary test checks both spellings.
+Inline OpenCode JSON/JSONC environment configuration is preserved when creating
+workers. Client-tool permissions name only the exact tools registered for that
+request, with an execution-time check; a similarly prefixed local plugin tool is
+not permitted. Content filtering is a normal completion reason, and exceeding
+the actual model output limit is a parameter-specific 400 rather than a 502.

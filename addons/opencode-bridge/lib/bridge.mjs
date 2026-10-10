@@ -6,8 +6,10 @@ import { mkdtemp, mkdir, writeFile, rm, cp, readFile, stat } from 'node:fs/promi
 import { spawn } from 'node:child_process';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { executableCommand } from './command.mjs';
-import { ApiError, validateRequest, toolName, nativeToolName, usageOf, sseEvents } from './protocol.mjs';
+import { ApiError, validateRequest, toolName, nativeToolName, toolPermissions, usageOf, sseEvents } from './protocol.mjs';
 import { publicReasoning } from './reasoning.mjs';
+import { modelCatalog } from './models.mjs';
+import { workerConfig } from './config.mjs';
 
 const SDK = { 'openai-chat': '@ai-sdk/openai-compatible', 'openai-responses': '@ai-sdk/openai', anthropic: '@ai-sdk/anthropic' };
 const delay = (ms, signal) => new Promise((resolve, reject) => {
@@ -44,6 +46,8 @@ export function normalizeConfig(input, directory = process.cwd()) {
   }
   const config = { ...input, mode, command: [...command], models, discoverModels: input.discoverModels ?? (mode === 'global' && input.models === undefined), maxConcurrent: input.maxConcurrent ?? 0, timeoutMs: input.timeoutMs ?? 120000, startupTimeoutMs: input.startupTimeoutMs ?? 30000 };
   if (input.workingDirectory !== undefined) config.workingDirectory = path.resolve(directory, input.workingDirectory);
+  config.modelIdStyle = input.modelIdStyle ?? 'short';
+  if (!['short', 'qualified'].includes(config.modelIdStyle)) throw new ApiError('modelIdStyle must be short or qualified.', 500);
   if (typeof config.discoverModels !== 'boolean' || (config.discoverModels && mode !== 'global')) throw new ApiError('discoverModels must be a boolean and is available only in global mode.', 500);
   if (!Number.isSafeInteger(config.maxConcurrent) || config.maxConcurrent < 0) throw new ApiError('maxConcurrent must be a nonnegative integer; 0 means unlimited.', 500);
   for (const key of ['timeoutMs', 'startupTimeoutMs']) if (!Number.isInteger(config[key]) || config[key] <= 0) throw new ApiError(`${key} must be a positive integer.`, 500);
@@ -211,7 +215,7 @@ function mcpServer(body, token) {
       let result;
       switch (rpc.method) {
         case 'initialize':
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.10.0' } };
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.11.0' } };
           break;
         case 'ping': result = {}; break;
         case 'tools/list':
@@ -238,12 +242,15 @@ function mcpServer(body, token) {
 export class OpenCodeBridge {
   constructor(config) {
     this.config = normalizeConfig(config);
+    this.acceptedModels = this.config.models;
     this.active = 0;
   }
   async loadModels() {
     if (!this.config.discoverModels) return this.config.models;
     this.catalog ??= discoverGlobalModels(this.config).then(models => {
-      this.config.models = { ...models, ...Object.fromEntries(Object.entries(this.config.models).map(([alias, model]) => [alias, { ...(models[model.model] ?? {}), ...model }])) };
+      const catalog = modelCatalog(models, this.config.models, this.config.modelIdStyle);
+      this.config.models = catalog.models;
+      this.acceptedModels = catalog.accepted;
       return this.config.models;
     }).catch(error => { this.catalog = undefined; throw error; });
     return this.catalog;
@@ -253,10 +260,10 @@ export class OpenCodeBridge {
   }
   async prepare(body, apiKey, signal) {
     await this.loadModels();
-    validateRequest(body, this.config.models);
+    validateRequest(body, this.acceptedModels);
     signal?.throwIfAborted();
     if (this.config.maxConcurrent > 0 && this.active >= this.config.maxConcurrent) throw new ApiError('All OpenCode workers are busy. Retry later.', 429, null, 'worker_busy');
-    const model = this.config.models[body.model];
+    const model = this.acceptedModels[body.model];
     const global = this.config.mode === 'global';
     const upstreamKey = model.apiKeyEnv ? process.env[model.apiKeyEnv] : apiKey;
     if (!global && !upstreamKey) throw new ApiError('Upstream API key is missing. Set the configured apiKeyEnv or sign in to the Magpie plugin.', 503, null, 'missing_upstream_key');
@@ -295,7 +302,7 @@ export class OpenCodeBridge {
       const requestFile = path.join(home, 'request.json');
       const hookFile = path.join(home, 'hooks-ready.json');
       await writeFile(requestFile, JSON.stringify({ body, modelID, providerID, outputLimit: model.output, global, hookFile }), { mode: 0o600 });
-      const permissions = { '*': 'deny', 'bridge_*': 'allow' };
+      const permissions = toolPermissions(body);
       const config = {
         ...(global
           ? (model.model ? { model: model.model } : {})
@@ -306,7 +313,7 @@ export class OpenCodeBridge {
         mcp: { bridge: { type: 'remote', url: `http://127.0.0.1:${mcpPort}/${token}`, oauth: false, timeout: this.config.timeoutMs } },
         agent: { bridge: { mode: 'primary', prompt: 'Follow the client instructions.', permission: permissions }, title: { disable: true } },
       };
-      Object.assign(env, { OPENCODE_CONFIG_CONTENT: JSON.stringify(config), OPENCODE_SERVER_PASSWORD: password, MAGPIE_BRIDGE_REQUEST: requestFile });
+      Object.assign(env, { OPENCODE_CONFIG_CONTENT: JSON.stringify(workerConfig(env.OPENCODE_CONFIG_CONTENT, config)), OPENCODE_SERVER_PASSWORD: password, MAGPIE_BRIDGE_REQUEST: requestFile });
       worker = start(command, ['serve', '--hostname', '127.0.0.1', '--port', String(port)], { env, cwd: directory, signal: combined });
       phase = 'server startup';
       const headers = { authorization: 'Basic ' + Buffer.from('opencode:' + password).toString('base64'), 'content-type': 'application/json' };
@@ -524,11 +531,11 @@ export class OpenCodeBridge {
         if (part.type === 'tool' && part.state.status === 'error') throw new ApiError('OpenCode rejected the tool call before returning it.', 502, null, 'opencode_tool_error');
         if (part.type === 'step-finish') {
           if (part.reason === 'tool-calls' && !toolIDs.size) throw new ApiError('OpenCode finished a tool batch without usable calls.', 502);
-          if (!['stop', 'length', 'tool-calls'].includes(part.reason)) throw new ApiError(`Unsupported OpenCode finish reason: ${part.reason}.`, 502);
+          if (!['stop', 'length', 'tool-calls', 'content-filter'].includes(part.reason)) throw new ApiError(`Unsupported OpenCode finish reason: ${part.reason}.`, 502);
           // The standard SDK publishes this after the MCP deferral acknowledgements.
           await run.abort();
           const usage = usageOf(part.tokens);
-          const reason = part.reason === 'tool-calls' ? 'tool_calls' : part.reason;
+          const reason = ({ 'tool-calls': 'tool_calls', 'content-filter': 'content_filter' })[part.reason] ?? part.reason;
           yield chunk({}, reason, body.stream ? undefined : usage);
           if (body.stream && body.stream_options?.include_usage) yield { ...meta, object: 'chat.completion.chunk', choices: [], usage };
           finished = true;

@@ -1,6 +1,6 @@
 # Magpie OpenCode bridge
 
-0.10.0 的默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号和并发请求数**。支持 `reasoning_effort` 思考强度，也可通过 `workingDirectory` 指定工作目录。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
+0.11.0 默认使用短模型 ID。默认示例使用**全局 OpenCode**，继承它的登录、订阅认证插件和供应商配置，**不限制版本号和并发请求数**。支持 `reasoning_effort` 思考强度，也可通过 `workingDirectory` 指定工作目录。网关不要求填写上游地址或 API Key；推理与凭证刷新均由真实 OpenCode 程序完成。没有修改 OpenCode 源码或二进制。
 
 请求方向：客户端 → Magpie → 插件 → 全局 OpenCode → 它配置的上游。也可运行独立的 OpenAI Chat HTTP 服务。
 
@@ -24,7 +24,7 @@ opencode models
 也可在解压目录用已有 CLI 安装（`magpie` 替换为本机 CLI 的实际命令或 EXE 路径）：
 
 ```powershell
-tar -xzf xshu-hub-magpie-opencode-bridge-0.10.0.tgz
+tar -xzf xshu-hub-magpie-opencode-bridge-0.11.0.tgz
 magpie plugin add .\package
 magpie plugin login opencode-bridge
 magpie serve
@@ -58,7 +58,9 @@ magpie serve
 | API Key | 默认本机模式可填 `magpie`；共享模式使用实际网关密钥 |
 | 模型 | `opencode-bridge/oc-default` |
 
-`oc-default` 使用 OpenCode 自己的默认模型选择逻辑。0.4.0 默认通过真实全局 OpenCode 的 `/provider` API 自动枚举已连接供应商的文本模型，客户端可直接选择 `opencode-bridge/provider/model`，例如 `opencode-bridge/xshu/gpt-6.1-sol`。OpenCode 报告为可用的免费模型也会列出。模型列表只复制名称、选择 ID 和 token 上限，不复制凭证、上游地址、请求头或供应商 options。
+`oc-default` 使用 OpenCode 自己的默认模型选择逻辑。0.4.0 默认通过真实全局 OpenCode 的 `/provider` API 自动枚举已连接供应商的文本模型，0.11.0 默认把唯一模型列为 `opencode-bridge/model`，例如 `opencode-bridge/gpt-6.1-sol`；同名模型来自多个供应商时保留 `opencode-bridge/provider/model`，避免选错供应商。原来的长 ID 仍作为兼容入口接受，但不重复出现在模型列表。OpenCode 报告为可用的免费模型也会列出。模型列表只复制名称、选择 ID 和 token 上限，不复制凭证、上游地址、请求头或供应商 options。
+
+`opencode-bridge/` 是 Magpie 的供应商路由前缀，插件保留它。独立服务不加此前缀，唯一模型可直接使用 `gpt-6.1-sol`。设置可选的 `modelIdStyle: "qualified"` 可以恢复原来的完整列表；默认值为 `"short"`。显式 `models` 别名保持原样、优先于自动名称。模型原有 ID 中的斜杠不会盲目截掉；如果短名会覆盖另一个模型的完整 ID，也保留完整路径。新增供应商导致短名重名时，重载后使用带供应商的 ID；需要长期固定名称可配置明确别名。
 
 每个插件宿主加载时读取一次模型列表，模型配置更新后重启 Magpie，或停用再启用插件重新加载。显式设置 `models` 时默认仅列出这些别名；设置 `discoverModels: true` 可同时加入自动发现的模型，`discoverModels: false` 可只保留默认别名。需要自定义别名时只指定 OpenCode 已有的模型名，不填上游地址和密钥：
 
@@ -96,7 +98,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 
 ```json
 {
-  "model": "opencode-bridge/provider/DeepSeek-V4.1-Flash-line2-maas",
+  "model": "opencode-bridge/DeepSeek-V4.1-Flash-line2-maas",
   "messages": [{ "role": "user", "content": "你好" }],
   "reasoning_effort": "high",
   "stream": true
@@ -113,7 +115,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 
 ## 全局模式的运行方式
 
-每个请求启动同一全局安装中的 OpenCode 程序。默认工作目录是系统临时目录下的 `magpie-oc-<随机字符>/workspace`；模型发现使用 `magpie-oc-models-<随机字符>/workspace`。请求结束、取消或失败后清理这些临时文件。HOME、配置、登录和认证插件保留原路径，所以 token 刷新由 OpenCode 写回真实登录文件，不是复制一份快照再丢弃。桥接代码不解析或发送供应商 token。
+每个请求启动同一全局安装中的 OpenCode 程序。默认工作目录是系统临时目录下的 `magpie-oc-<随机字符>/workspace`；模型发现使用 `magpie-oc-models-<随机字符>/workspace`。请求结束、取消或失败后清理这些临时文件。HOME、配置、登录和认证插件保留原路径，所以 token 刷新由 OpenCode 写回真实登录文件，不是复制一份快照再丢弃。桥接代码不解析或发送供应商 token。原有 `OPENCODE_CONFIG_CONTENT`（JSON/JSONC）会保留供应商、插件和选项，再叠加临时 worker 设置，使模型发现与推理使用一致的环境配置；无效内容明确报错。
 
 0.9.0 起可在插件 `package` 目录的 `config.json` 中指定已经存在的工作目录：
 
@@ -133,7 +135,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 
 两个模式均使用 OpenCode 的标准 AI SDK 运行时，使全局模式中供应商插件的 `auth.loader` 与 `fetch` 保持生效。既有插件会照常执行，OpenCode 本身可能维护配置目录的依赖、缓存、日志或配置格式；桥接不改写供应商配置。
 
-内置工具和其他 MCP 服务在这个 API worker 内禁用。客户端函数以 MCP 形式注册；调用时只返回“交由客户端执行”的内部确认，不执行函数。标准 SDK 完成整批调用后发布 `step-finish`。公开的消息 hook 阻止下一轮模型推理，网关据该事件返回工具调用并取消 worker；该内部确认不会发送给客户端，也不会被用于下一次供应商推理。下一次请求重新注入完整历史和客户端的真实结果。
+内置工具和其他 MCP 服务在这个 API worker 内禁用。0.11.0 将工具权限收窄为本次请求注册的精确客户端工具名，并在工具执行前再次检查；全局插件中仅以 `bridge_` 开头的本地工具不会因此获得权限。`tool_choice: none` 不放行任何客户端工具。客户端函数以 MCP 形式注册；调用时只返回“交由客户端执行”的内部确认，不执行函数。标准 SDK 完成整批调用后发布 `step-finish`。公开的消息 hook 阻止下一轮模型推理，网关据该事件返回工具调用并取消 worker；该内部确认不会发送给客户端，也不会被用于下一次供应商推理。下一次请求重新注入完整历史和客户端的真实结果。
 
 默认不限制并发，每个请求使用独立的 OpenCode 进程、会话数据库、MCP 服务和取消信号。未指定工作目录时，cwd 也独立。取消一个请求只清理该请求的 worker。`maxConcurrent` 省略或设为 `0` 均表示不限；只有显式设置正整数时才限制活动请求数，满时返回 429。升级已有配置时，把旧的 `maxConcurrent: 1` 删除或改为 `0`。
 
@@ -146,9 +148,9 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 | `/v1/models`、`/v1/chat/completions` | 支持；默认列出 OpenCode 已连接供应商的文本模型及 oc-default |
 | 文本、多轮角色历史、system/developer | 支持；system/developer 位于历史开头，按顺序合成系统提示 |
 | assistant.reasoning_content 历史 | 接受字符串、空字符串和 null；非空思考内容作为独立 OpenCode reasoning part 回放，不混入可见正文 |
-| stream=true/false | 支持；首个模型输出前的失败返回 HTTP JSON 错误，输出后的失败发送 SSE error 后关闭；成功以 `[DONE]` 结束 |
+| stream=true/false | 支持 stop、length、tool_calls、content_filter 结束原因；首个模型输出前的失败返回 HTTP JSON 错误，输出后的失败发送 SSE error 后关闭；成功以 `[DONE]` 结束 |
 | tools、同轮多个调用、工具结果续接 | 支持普通 function 工具与文本结果；结果按 tool_call_id 匹配 |
-| temperature、top_p、max_tokens/max_completion_tokens | 通过 OpenCode 参数 hook 设置；最终接受范围由实际模型决定 |
+| temperature、top_p、max_tokens/max_completion_tokens | 通过 OpenCode 参数 hook 设置；最终接受范围由实际模型决定。超出真实输出上限时返回带具体参数名的 400 |
 | reasoning_effort | 支持；显式值覆盖默认，优先使用 OpenCode 同名 variant，OpenAI 系 SDK 可使用原生选项；其他 SDK 无映射时返回 400 |
 | stream_options.include_usage | 支持；计数来自 OpenCode |
 | tool_choice | auto/none；none 不注册工具 |
@@ -200,3 +202,5 @@ TEST_OPENCODE_COMMAND='["/absolute/path/to/opencode"]' \
 测试全部使用临时 HOME 和 loopback fixture，不接触真实登录。并发测试让四个真实 OpenCode worker 在同一个指定 cwd 下的上游请求同时保持活动，验证混合流式/非流式结果隔离、独立数据库、复用登录和独立取消。目录测试覆盖带中文及空格的路径、相对配置路径、模型发现与推理的实际 cwd、错误目录、项目配置仍关闭、默认临时目录清理以及指定目录的现有文件保留。
 
 GitHub workflow 在 Windows/Linux 上分别验证 OpenCode 1.16.2 和 1.18.35，并把已打包的插件安装到 SHA256 核验过的官方 Magpie CLI 0.1.1141 中，检查自动模型发现、普通回复、SSE、工具结果续接和四请求同目录并发。思考强度检查覆盖报告中的自定义 DeepSeek 模型名、OpenAI compatible 原生字段、默认值保留、OpenCode 嵌套 variant、原生 Anthropic thinking、无映射时推理前拒绝，以及并发不同强度互不串扰。上游为本地 fixture，这不代表已验证报告人的内网 MaaS 对各个档位的接受范围。该流程只打包一份两种平台通用的插件，不编译或交付 Magpie。官方 EXE 仅下载用于测试，保持原始字节。测试其他版本时可用 `TEST_OPENCODE_PLUGIN_DIR` 指定测试安装中的真实 SDK 目录，`TEST_OPENCODE_VERSION` 用于核验版本响应头；这些变量没有运行版本白名单。单独运行原版 Magpie 验证时，需要设置 `TEST_MAGPIE_COMMAND`（JSON 可执行文件数组）、`TEST_BRIDGE_PACKAGE`（已打包 tgz 路径）以及上述 OpenCode 变量，再运行 `npm run test:magpie`。GUI 点击安装流程没有纳入该 CLI 验收。
+
+0.11.0 回归测试还覆盖短 ID、重名/显式别名冲突、旧长 ID 的原版 Magpie 调用、环境变量提供的供应商、前缀相同的本地工具不得执行、内容过滤结束，以及两个输出 token 字段的真实上限边界。

@@ -16,6 +16,9 @@ export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'x
 export const toolName = (name) => 't_' + createHash('sha256').update(name).digest('hex').slice(0, 24);
 export const nativeToolName = (name) => 'bridge_' + toolName(name);
 
+export const clientToolNames = body => (body.tool_choice === 'none' ? [] : body.tools ?? []).map(t => nativeToolName(t.function.name));
+export const toolPermissions = body => Object.fromEntries([['*', 'deny'], ...clientToolNames(body).map(name => [name, 'allow'])]);
+
 export function textContent(content, param, nullable = false) {
   if (nullable && content == null) return '';
   if (typeof content === 'string') return content;
