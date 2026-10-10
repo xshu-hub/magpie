@@ -15,7 +15,7 @@ export const OpenCodeBridgePlugin = async (_, options = {}) => {
   const id = 'opencode-bridge';
   const api = 'http://opencode-bridge.local/v1';
   const variants = model => Object.fromEntries((model.reasoningEfforts ?? []).map(effort => [effort, {}]));
-  const definitions = models => Object.fromEntries(Object.entries(models).map(([name, model]) => [name, { name: model.name ?? name, limit: { context: model.context, output: model.output }, modalities: { input: ['text'], output: ['text'] }, reasoning: model.reasoning === true, variants: variants(model) }]));
+  const definitions = models => Object.fromEntries(Object.entries(models).map(([name, model]) => [name, { name: model.name ?? name, limit: { context: model.context, output: model.output }, modalities: { input: ['text'], output: ['text'] }, temperature: model.temperature !== false, tool_call: model.toolcall !== false, reasoning: model.reasoning === true, variants: variants(model) }]));
   return {
     config: async (cfg) => {
       cfg.provider ??= {};
@@ -33,7 +33,7 @@ export const OpenCodeBridgePlugin = async (_, options = {}) => {
         ...(provider.models?.[name] ?? {}), id: name, providerID: id, name: model.name ?? name,
         api: { id: name, url: api, npm: '@ai-sdk/openai-compatible' },
         limit: { context: model.context, output: model.output },
-        capabilities: { temperature: true, toolcall: true, reasoning: model.reasoning === true, input: { text: true }, output: { text: true } },
+        capabilities: { temperature: model.temperature !== false, toolcall: model.toolcall !== false, reasoning: model.reasoning === true, input: { text: true }, output: { text: true } },
         variants: variants(model),
       }])),
     },

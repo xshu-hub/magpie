@@ -44,7 +44,7 @@ export function validateRequest(body, models) {
   }
   if (body.max_tokens !== undefined && body.max_completion_tokens !== undefined) fail('Specify only one output token limit.', 'max_completion_tokens');
   const max = body.max_completion_tokens ?? body.max_tokens;
-  if (max !== undefined && (!Number.isInteger(max) || max <= 0 || max > models[body.model].output)) fail('Output token limit must be positive and within the configured model limit.', 'max_tokens');
+  if (max !== undefined && (!Number.isInteger(max) || max <= 0 || max > models[body.model].output)) fail(`Output token limit (${JSON.stringify(max)}) must be a positive integer no greater than the configured model limit (${models[body.model].output}).`, body.max_completion_tokens !== undefined ? 'max_completion_tokens' : 'max_tokens');
   const tools = body.tools ?? [];
   if (!Array.isArray(tools) || tools.length > 128) fail('tools must be an array of at most 128 functions.', 'tools');
   const names = new Set();

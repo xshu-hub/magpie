@@ -178,3 +178,15 @@ workers. Client-tool permissions name only the exact tools registered for that
 request, with an execution-time check; a similarly prefixed local plugin tool is
 not permitted. Content filtering is a normal completion reason, and exceeding
 the actual model output limit is a parameter-specific 400 rather than a 502.
+
+OpenCode bridge 0.12.0 also confirms the system transformation hook before
+accepting prepared inference. Its worker clears unused instruction URLs and
+extra skill paths/URLs before prompt construction; this avoids downloads whose
+results would otherwise be discarded. Global plugins still run for authentication
+and may have other hooks; this is not a plugin sandbox. Client-provided skill
+instructions are preserved. Omitted sampling parameters retain native defaults,
+and discovered temperature/tool-call capabilities are copied rather than assumed.
+Client tool descriptions identify the original function alongside the internal
+registered name. Timeout reasons survive a native event-fetch abort in both JSON
+and SSE paths; errors after SSE headers remain stream error events, not new HTTP
+statuses. Token-limit errors identify the value, ceiling and supplied field.

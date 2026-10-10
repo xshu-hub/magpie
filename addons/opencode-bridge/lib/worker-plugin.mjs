@@ -6,6 +6,7 @@ import { applyReasoning } from './reasoning.mjs';
 export const BridgeWorker = async ({ directory }) => {
   let request;
   let injected = false;
+  let systemTransformed = false;
   const get = async () => request ??= JSON.parse(await readFile(process.env.MAGPIE_BRIDGE_REQUEST, 'utf8'));
   return {
     config: async cfg => {
@@ -19,6 +20,10 @@ export const BridgeWorker = async ({ directory }) => {
       cfg.snapshot = false;
       cfg.autoupdate = false;
       cfg.share = 'disabled';
+      // These are discarded by our prompt hook anyway. Do not fetch remote
+      // rules or skill catalogs before reaching that hook.
+      cfg.instructions = [];
+      cfg.skills = { paths: [], urls: [] };
       for (const name of Object.keys(cfg.mcp ?? {})) if (name !== 'bridge') cfg.mcp[name] = { ...cfg.mcp[name], enabled: false };
     },
     'tool.execute.before': async ({ tool }) => {
@@ -37,24 +42,24 @@ export const BridgeWorker = async ({ directory }) => {
     'experimental.chat.system.transform': async (_, output) => {
       const r = await get();
       output.system.splice(0, output.system.length, ...toNativeHistory(r.body, '', r.modelID, directory).system);
+      systemTransformed = true;
     },
     'chat.params': async (input, output) => {
       const { body, outputLimit, global, hookFile } = await get();
-      if (!injected) throw new Error('OpenCode did not invoke the required message transformation hook.');
+      if (!injected || !systemTransformed) throw new Error('OpenCode did not invoke the required message and system transformation hooks.');
       if (global && (input.model.providerID === 'opencode-bridge' || input.model.id.startsWith('opencode-bridge/'))) throw new Error('OpenCode points back to this bridge. Select an upstream model in OpenCode.');
-      output.temperature = body.temperature;
-      output.topP = body.top_p;
-      output.topK = undefined;
+      if (body.temperature !== undefined) output.temperature = body.temperature;
+      if (body.top_p !== undefined) output.topP = body.top_p;
       try {
         const requested = body.max_completion_tokens ?? body.max_tokens;
-        if (requested !== undefined && input.model.limit.output > 0 && requested > input.model.limit.output) throw new ApiError('Requested output tokens exceed the OpenCode model limit.', 400, body.max_completion_tokens !== undefined ? 'max_completion_tokens' : 'max_tokens');
+        if (requested !== undefined && input.model.limit.output > 0 && requested > input.model.limit.output) throw new ApiError(`Requested output tokens (${requested}) exceed the OpenCode model limit (${input.model.limit.output}).`, 400, body.max_completion_tokens !== undefined ? 'max_completion_tokens' : 'max_tokens');
         output.maxOutputTokens = requested ?? Math.min(outputLimit, input.model.limit.output || outputLimit);
         output.options = applyReasoning(input.model, output.options, body.reasoning_effort);
       } catch (error) {
         if (error instanceof ApiError) await writeFile(hookFile, JSON.stringify({ error: { status: error.status, ...error.body().error } }), { mode: 0o600 });
         throw error;
       }
-      await writeFile(hookFile, JSON.stringify({ history: true, params: true }), { mode: 0o600 });
+      await writeFile(hookFile, JSON.stringify({ history: true, system: true, params: true }), { mode: 0o600 });
       // Provider defaults may still add vendor-specific options; request fields are never invented.
     },
   };

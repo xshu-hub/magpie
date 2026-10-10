@@ -24,7 +24,12 @@ const requests = [];
 let refreshes = 0;
 let parallelRequests;
 let pausedStream;
+let auditStream;
+let instructionFetches = 0;
+let skillFetches = 0;
 const upstream = http.createServer(async (req, res) => {
+  if (req.url === '/audit-instructions') { instructionFetches++; res.end('REMOTE_INSTRUCTION_SENTINEL'); return; }
+  if (req.url === '/audit-skills/index.json') { skillFetches++; res.setHeader('content-type', 'application/json'); res.end('{"skills":[]}'); return; }
   if (req.url === '/refresh') {
     refreshes++;
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -59,7 +64,15 @@ const upstream = http.createServer(async (req, res) => {
   }
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   const emit = (delta, reason = null, usage) => res.write(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'mock', choices: [{ index: 0, delta, finish_reason: reason }], ...(usage ? { usage } : {}) })}\n\n`);
-  if (body.messages.some(m => m.role === 'user' && m.content === 'AUDIT_LOCAL_TOOL')) {
+  if (body.messages.some(m => m.content === 'AUDIT_INCREMENTAL')) {
+    for (const text of ['思', '考', '。']) { emit({ reasoning_content: text }); await delay(30); }
+    for (const text of ['你好', '🙂', '\n\n```python\n']) { emit({ content: text }); await delay(30); }
+    auditStream.started.resolve();
+    await auditStream.release.promise;
+    if (res.destroyed) return;
+    for (const text of auditStream.tail) { emit({ content: text }); await delay(5); }
+    emit({}, 'stop', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  } else if (body.messages.some(m => m.role === 'user' && m.content === 'AUDIT_LOCAL_TOOL')) {
     emit({tool_calls:[{index:0,id:'audit_local',type:'function',function:{name:'bridge_audit_local',arguments:'{}'}}]});
     emit({},'tool_calls',{prompt_tokens:10,completion_tokens:5,total_tokens:15});
   } else if (body.messages.some(m => m.role === 'user' && ['AUDIT_FILTER', 'AUDIT_FILTER_TEXT'].includes(m.content))) {
@@ -137,6 +150,7 @@ const globalConfig = {
     'fixture-oauth': { npm: '@ai-sdk/openai-compatible', options: { baseURL: baseURL + '/v1' }, models: { mock: { name: 'Subscription fixture', temperature: true, limit: { context: 100000, output: 1000 } } } },
     'fixture-api': { npm: '@ai-sdk/openai-compatible', options: { baseURL: baseURL + '/v1' }, models: {
       mock: { name: 'Saved key fixture', limit: { context: 100000, output: 1000 } },
+      'text-only': { temperature: false, tool_call: false, limit: { context: 100000, output: 1000 } },
       'DeepSeek-V4.1-Flash-line2-maas': { name: 'DeepSeek-V4.1-Flash-line2-maas', reasoning: false, options: { reasoningEffort: 'xhigh' }, limit: { context: 100000, output: 1000 } },
       'native-variants': { reasoning: true, options: { reasoningEffort: 'xhigh', fixture_nested: { keep: 'base', choose: 'base' } }, variants: { low: { reasoningEffort: 'low' }, high: { reasoningEffort: 'high', fixture_nested: { choose: 'native-high' } }, max: { reasoningEffort: 'max' }, private: { privateVariantToken: 'must-not-enter-metadata' } }, limit: { context: 100000, output: 1000 } },
     } },
@@ -280,6 +294,7 @@ test('any provider SDK can return complete tool batches without local execution 
     await delay(1000);
     assert.equal(requests.length, before + 1);
     assert.deepEqual(requests.at(-1).body.tools.map(t => t.function.name).sort(), ['weather', 'clock'].map(nativeToolName).sort(), 'No global built-in or unrelated MCP tool reaches the model');
+    for (const name of ['weather', 'clock']) assert.match(requests.at(-1).body.tools.find(t => t.function.name === nativeToolName(name)).function.description, new RegExp('Client function: ' + name));
     const chunks = await Array.fromAsync(bridge.chunks(body, run, { id: 'test', created: 0, model: 'oc-default' }));
     const calls = chunks.flatMap(c => c.choices[0]?.delta.tool_calls ?? []);
     assert.deepEqual(calls.map(c => c.function.name), ['weather', 'clock']);
@@ -614,4 +629,74 @@ test('short discovery IDs and legacy qualified IDs invoke the same real upstream
     assert.equal(requests.at(-1).body.model,id);
     assert.equal(requests.at(-1).auth,'Bearer fixture-saved-api-key');
   }
+});
+
+
+test('audit12: client prompts replace global instructions, skills and plugin prompt edits', { timeout: 60000 }, async t => {
+  const noise = path.join(configDir, 'audit-noise.mjs');
+  const skillDir = path.join(configDir, 'skills', 'audit-skill');
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: audit-skill\ndescription: GLOBAL_SKILL_SENTINEL\n---\nGLOBAL_SKILL_BODY');
+  await writeFile(path.join(configDir, 'AGENTS.md'), 'GLOBAL_AGENTS_SENTINEL');
+  await writeFile(path.join(workingDirectory, 'AGENTS.md'), 'PROJECT_AGENTS_SENTINEL');
+  await writeFile(noise, `export const Noise = async () => ({
+    'experimental.chat.system.transform': async (_, out) => { out.system.push('PLUGIN_SYSTEM_SENTINEL'); },
+    'experimental.chat.messages.transform': async (_, out) => { out.messages[0].parts.push({ ...out.messages[0].parts[0], text: 'PLUGIN_MESSAGE_SENTINEL' }); },
+    'chat.params': async (_, out) => { out.temperature = 0.37; out.topP = 0.83; out.topK = 17; }
+  });`);
+  await writeFile(path.join(configDir, 'opencode.json'), JSON.stringify({ ...globalConfig, plugin: [...globalConfig.plugin, pathToFileURL(noise).href], instructions: [baseURL + '/audit-instructions'], skills: { urls: [baseURL + '/audit-skills'] } }));
+  try {
+    const instance = new OpenCodeBridge({ ...options, workingDirectory });
+    const response = await request({ messages: [{ role: 'system', content: 'CLIENT_SYSTEM_ONLY' }, { role: 'developer', content: 'CLIENT_DEVELOPER_ONLY' }, { role: 'user', content: 'CLIENT_USER_ONLY' }] }, instance);
+    assert.equal(response.status, 200, await response.text());
+    const sent = requests.at(-1).body;
+    assert.deepEqual(sent.messages.filter(m => m.role === 'system').map(m => m.content), ['CLIENT_SYSTEM_ONLY', 'CLIENT_DEVELOPER_ONLY']);
+    assert.equal(sent.messages.at(-1).content, 'CLIENT_USER_ONLY');
+    assert.doesNotMatch(JSON.stringify(sent), /GLOBAL_SKILL|GLOBAL_AGENTS|PROJECT_AGENTS|PLUGIN_SYSTEM|PLUGIN_MESSAGE|REMOTE_INSTRUCTION|Complete the current client request|Follow the client instructions/);
+    assert.deepEqual(sent.tools ?? [], []);
+    await t.test('discarded instructions do not fetch remote content', () => assert.equal(instructionFetches, 0));
+    await t.test('disabled skills do not fetch remote catalogs', () => assert.equal(skillFetches, 0));
+    await t.test('omitted sampling parameters preserve defaults', () => {
+      assert.equal(sent.temperature, 0.37);
+      assert.equal(sent.top_p, 0.83);
+    });
+    const override = await request({ messages: [{ role: 'user', content: 'explicit' }], temperature: 0.1, top_p: 0.6 }, instance);
+    assert.equal(override.status, 200, await override.text());
+    assert.equal(requests.at(-1).body.temperature, 0.1);
+    assert.equal(requests.at(-1).body.top_p, 0.6);
+  } finally { await writeFile(path.join(configDir, 'opencode.json'), originalConfig); }
+});
+
+test('audit12: reasoning and multiline Unicode code stream before completion without duplication', { timeout: 60000 }, async () => {
+  auditStream = { started: Promise.withResolvers(), release: Promise.withResolvers(), tail: Array.from({ length: 40 }, (_, i) => 'print("第' + i + '行🙂")\n').concat('```') };
+  const response = await request({ messages: [{ role: 'user', content: 'AUDIT_INCREMENTAL' }], stream: true, stream_options: { include_usage: true } });
+  assert.equal(response.status, 200);
+  const chunks = [];
+  const firstText = Promise.withResolvers();
+  const consume = (async () => { for await (const chunk of sseEvents(response.body)) { chunks.push(chunk); if (chunk.choices?.[0]?.delta?.content) firstText.resolve(); } })();
+  let timer;
+  try {
+    await Promise.race([firstText.promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Text was buffered until upstream completion')), 5000); })]);
+    assert.equal(chunks.some(c => c.choices?.[0]?.finish_reason), false);
+  } finally { clearTimeout(timer); auditStream.release.resolve(); }
+  await consume;
+  assert.equal(chunks.some(c => c.error), false, JSON.stringify(chunks));
+  assert.equal(chunks.map(c => c.choices?.[0]?.delta?.reasoning_content ?? '').join(''), '思考。');
+  assert.equal(chunks.map(c => c.choices?.[0]?.delta?.content ?? '').join(''), '你好🙂\n\n```python\n' + auditStream.tail.join(''));
+  assert.ok(chunks.filter(c => c.choices?.[0]?.delta?.content).length > 10);
+  assert.equal(chunks.filter(c => c.choices?.[0]?.finish_reason === 'stop').length, 1);
+  assert.equal(chunks.at(-1).usage.total_tokens, 15);
+  assert.equal(bridge.active, 0);
+});
+
+test('audit12: discovered tool and sampling capabilities match native model metadata', { timeout: 60000 }, async () => {
+  const configFile = path.join(home, 'audit-catalog.json');
+  await writeFile(configFile, JSON.stringify({ mode: 'global', command }));
+  const plugin = await OpenCodeBridgePlugin({}, { configFile });
+  const cfg = {};
+  await plugin.config(cfg);
+  const models = await plugin.provider.models(cfg.provider['opencode-bridge']);
+  assert.equal(models['text-only'].capabilities.toolcall, false);
+  assert.equal(models['text-only'].capabilities.temperature, false);
+  assert.equal(cfg.provider['opencode-bridge'].models['text-only'].tool_call, false);
 });

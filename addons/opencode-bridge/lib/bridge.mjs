@@ -77,7 +77,7 @@ function sandboxEnv(home) {
     TMP: home, TEMP: home, TMPDIR: home,
     OPENCODE_DISABLE_PROJECT_CONFIG: '1', OPENCODE_DISABLE_AUTOUPDATE: '1', OPENCODE_DISABLE_MODELS_FETCH: '1',
     OPENCODE_DISABLE_DEFAULT_PLUGINS: '1', OPENCODE_DISABLE_EXTERNAL_SKILLS: '1', OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
-    OPENCODE_DISABLE_AUTOCOMPACT: '1', OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: '1', OPENCODE_EXPERIMENTAL_NATIVE_LLM: '0',
+    OPENCODE_DISABLE_CLAUDE_CODE_PROMPT: '1', OPENCODE_DISABLE_AUTOCOMPACT: '1', OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: '1', OPENCODE_EXPERIMENTAL_NATIVE_LLM: '0',
   });
   return env;
 }
@@ -90,7 +90,7 @@ function globalEnv(home) {
     OPENCODE_DB: path.join(home, 'opencode.sqlite'),
     OPENCODE_DISABLE_PROJECT_CONFIG: '1', OPENCODE_DISABLE_AUTOUPDATE: '1',
     OPENCODE_DISABLE_DEFAULT_PLUGINS: '0', OPENCODE_DISABLE_EXTERNAL_SKILLS: '1', OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
-    OPENCODE_DISABLE_AUTOCOMPACT: '1', OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: '1', OPENCODE_EXPERIMENTAL_NATIVE_LLM: '0',
+    OPENCODE_DISABLE_CLAUDE_CODE_PROMPT: '1', OPENCODE_DISABLE_AUTOCOMPACT: '1', OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: '1', OPENCODE_EXPERIMENTAL_NATIVE_LLM: '0',
   };
 }
 
@@ -185,7 +185,7 @@ async function discoverGlobalModels(config) {
       for (const [id, model] of Object.entries(provider.models ?? {})) {
         const alias = provider.id + '/' + id;
         if (!/^[^/\s]+\/\S+$/.test(alias) || model.capabilities?.output?.text === false || model.capabilities?.input?.text === false) continue;
-        models[alias] = { model: alias, name: model.name || id, context: limit(model.limit?.context, 128000), output: limit(model.limit?.output, 16384), ...publicReasoning(model) };
+        models[alias] = { model: alias, name: model.name || id, context: limit(model.limit?.context, 128000), output: limit(model.limit?.output, 16384), temperature: model.capabilities?.temperature !== false, toolcall: model.capabilities?.toolcall !== false, ...publicReasoning(model) };
       }
     }
     return models;
@@ -215,11 +215,11 @@ function mcpServer(body, token) {
       let result;
       switch (rpc.method) {
         case 'initialize':
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.11.0' } };
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'magpie-opencode-bridge', version: '0.12.0' } };
           break;
         case 'ping': result = {}; break;
         case 'tools/list':
-          result = { tools: (body.tool_choice === 'none' ? [] : body.tools ?? []).map(t => ({ name: toolName(t.function.name), description: t.function.description ?? t.function.name, inputSchema: t.function.parameters ?? { type: 'object', properties: {} } })) };
+          result = { tools: (body.tool_choice === 'none' ? [] : body.tools ?? []).map(t => ({ name: toolName(t.function.name), description: `Client function: ${t.function.name}. Use this registered tool when client instructions refer to ${t.function.name}.\n\n${t.function.description ?? ''}`, inputSchema: t.function.parameters ?? { type: 'object', properties: {} } })) };
           break;
         case 'tools/call':
           // Acknowledge deferral only. No client function runs here. This lets
@@ -379,7 +379,7 @@ export class OpenCodeBridge {
         combined.throwIfAborted();
         const ready = await hookState();
         checkHookError(ready);
-        if (ready?.history === true && ready?.params === true) break;
+        if (ready?.history === true && ready?.system === true && ready?.params === true) break;
         if (worker.error || worker.child.exitCode !== null || Date.now() >= hookDeadline) throw new ApiError('OpenCode did not invoke the required message and parameter hooks. Check runtime/plugin compatibility.', 503, null, 'opencode_hooks_incompatible');
         const next = await Promise.race([pending, delay(50, combined).then(() => ({}))]);
         if (next.error) throw next.error;
@@ -543,7 +543,14 @@ export class OpenCodeBridge {
         }
       }
       if (!finished) throw new ApiError('OpenCode disconnected before completion.', 502, null, 'incomplete_stream');
-    } catch (error) { await run.diagnose?.({ events: trace }); throw error; }
+    } catch (error) {
+      await run.diagnose?.({ events: trace });
+      if (run.signal.aborted) {
+        if (run.signal.reason instanceof ApiError) throw run.signal.reason;
+        throw new ApiError('Request cancelled.', 499, null, 'request_cancelled');
+      }
+      throw error;
+    }
     finally { await run.cleanup(); }
   }
 }

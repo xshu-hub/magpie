@@ -204,3 +204,19 @@ TEST_OPENCODE_COMMAND='["/absolute/path/to/opencode"]' \
 GitHub workflow 在 Windows/Linux 上分别验证 OpenCode 1.16.2 和 1.18.35，并把已打包的插件安装到 SHA256 核验过的官方 Magpie CLI 0.1.1141 中，检查自动模型发现、普通回复、SSE、工具结果续接和四请求同目录并发。思考强度检查覆盖报告中的自定义 DeepSeek 模型名、OpenAI compatible 原生字段、默认值保留、OpenCode 嵌套 variant、原生 Anthropic thinking、无映射时推理前拒绝，以及并发不同强度互不串扰。上游为本地 fixture，这不代表已验证报告人的内网 MaaS 对各个档位的接受范围。该流程只打包一份两种平台通用的插件，不编译或交付 Magpie。官方 EXE 仅下载用于测试，保持原始字节。测试其他版本时可用 `TEST_OPENCODE_PLUGIN_DIR` 指定测试安装中的真实 SDK 目录，`TEST_OPENCODE_VERSION` 用于核验版本响应头；这些变量没有运行版本白名单。单独运行原版 Magpie 验证时，需要设置 `TEST_MAGPIE_COMMAND`（JSON 可执行文件数组）、`TEST_BRIDGE_PACKAGE`（已打包 tgz 路径）以及上述 OpenCode 变量，再运行 `npm run test:magpie`。GUI 点击安装流程没有纳入该 CLI 验收。
 
 0.11.0 回归测试还覆盖短 ID、重名/显式别名冲突、旧长 ID 的原版 Magpie 调用、环境变量提供的供应商、前缀相同的本地工具不得执行、内容过滤结束，以及两个输出 token 字段的真实上限边界。
+
+## 0.12.0 提示词、工具与流式检查
+
+API worker 的消息与系统提示词分别通过公开 hooks 替换为客户端历史及 system/developer 内容；现在必须确认系统 hook 也执行成功才视为兼容。客户端自己传来的 Skills、工作区说明仍保留。测试向临时全局配置、工作目录、Skills 和插件中植入不同标记，核验它们不会混入上游请求。
+
+全局模式仍加载 OpenCode 默认与用户插件以复用登录认证，不是“仅加载认证钩子”的隔离环境。桥接会覆盖较早运行的消息/系统提示词钩子结果，但第三方插件的初始化、事件、参数、请求头及认证 fetch 等逻辑仍可能运行；无法保证任意认证插件发出的最终请求字节完全不变。
+
+worker 配置钩子清空额外 instructions 和 skills.paths/urls，避免为即将丢弃的规则或 Skills 下载远程内容；同时禁用 Claude Code 规则加载。OpenCode 自身仍可能扫描全局 Skills 目录，扫描不等于内容会发送给模型。这些设置只作用于临时 worker，不改用户全局文件。
+
+未传 temperature/top_p 时保留 OpenCode 和插件默认值；显式传值覆盖对应字段。保留 OpenCode 的 topK 默认值。自动模型目录复制原生 temperature/toolcall 标记；缺少元数据时保持兼容默认值。客户端工具仍使用内部散列名，描述中增加原始客户端函数名，使提示词中的 read、skill 等名称能对应到注册工具；客户端收到的调用名不变，只有客户端执行实际工具。工具参数仍在完整解析后作为一个调用块返回，不是逐字符参数流。
+
+流中超时保留 opencode_timeout；尚未发送 SSE 时返回 HTTP 504，已开始 SSE 时发送错误事件并关闭流。请求取消与上游错误分开呈现。Token 上限错误包含请求值、允许上限和实际字段名。原版 Magpie 仍可能包装错误字段；HTTP 499 仍表示客户端请求取消，不能据此确定等待慢的根因。
+
+分块测试让上游在输出思考、中文、Emoji 和代码块开头后暂停，确认客户端此时已收到内容，再逐块输出 40 行代码；检查无丢失、无重复、唯一结束标记、usage，以及原有取消清理和并发工具续接。保留默认 120 秒总超时和每请求独立 OpenCode 进程；未引入并发限制或进程池。
+
+工具 schema 还有一项原生差异：已测试的 OpenCode MCP 转换会把参数根对象的 additionalProperties 强制设为 false，即使客户端省略它或传 true；嵌套字段的设置保留。因此依赖任意顶层参数名的函数不能认为与原生 OpenAI 等价。当前 MCP 路径没有可用的公开 schema 覆盖钩子；桥接未修改 OpenCode 来绕过这个限制。
