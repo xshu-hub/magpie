@@ -55,6 +55,13 @@ const upstream = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ error: { message: 'Fixture provider rejected this request.', type: 'permission_error' } }));
     return;
   }
+  if (body.messages.some(m => ['TIMEOUT_FIRST', 'TIMEOUT_IDLE'].includes(m.content))) {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (body.messages.some(m => m.content === 'TIMEOUT_IDLE')) res.write('data: ' + JSON.stringify({id:'timing',object:'chat.completion.chunk',created:1,model:'mock',choices:[{index:0,delta:{content:'Before idle.'},finish_reason:null}]}) + '\n\n');
+    const timer = setInterval(() => res.write(': upstream-heartbeat\n\n'), 40);
+    res.once('close', () => clearInterval(timer));
+    return;
+  }
   const marker = body.messages.find(m => m.role === 'user' && typeof m.content === 'string' && parallelRequests?.has(m.content))?.content;
   if (marker) {
     const pending = parallelRequests.get(marker);
@@ -204,7 +211,7 @@ if (command.length === 1) {
   }
   process.env.PATH = bin + path.delimiter + (process.env.PATH ?? process.env.Path ?? '');
 }
-const options = { mode: 'global', ...(fixtureCommand ? { command: fixtureCommand } : {}), timeoutMs: 45000, startupTimeoutMs: 20000, models: { 'oc-default': { context: 100000, output: 1000 } } };
+const options = { workerReuse: false, diagnostics: false, mode: 'global', ...(fixtureCommand ? { command: fixtureCommand } : {}), timeoutMs: 45000, startupTimeoutMs: 20000, models: { 'oc-default': { context: 100000, output: 1000 } } };
 options.onFailure = async ({ phase, output, events }) => {
   console.log('Global OpenCode fixture phase:', phase, 'output:', output, 'events:', events);
   const dir = path.join(data, 'log');
@@ -463,7 +470,7 @@ test('a plugin with no config.json uses global OpenCode and discovers its models
 });
 
 test('global workers share a configured directory while concurrent inference and cancellation remain isolated', { timeout: 90000 }, async () => {
-  const instance = new OpenCodeBridge({ ...options, workingDirectory, models: {
+  const instance = new OpenCodeBridge({ ...options, workerReuse: true, workingDirectory, models: {
     ...options.models,
     'saved-api': { model: 'fixture-api/mock', context: 100000, output: 1000 },
   } });
@@ -517,6 +524,7 @@ test('global workers share a configured directory while concurrent inference and
     const auth = JSON.parse(await readFile(authFile, 'utf8'));
     assert.equal(auth.untouched.key, 'fixture-unrelated-key');
     assert.equal((await readdir(data)).some(n => n.endsWith('.sqlite')), false);
+    await instance.close();
     const workers = (await observations()).slice(beforeWorkers);
     assert.equal(new Set(workers.map(w => w.pid)).size, 4, 'All four requests have different OpenCode processes');
     assert.equal(new Set(workers.map(w => w.db)).size, 4, 'Sharing cwd must not share session databases');
@@ -532,6 +540,7 @@ test('global workers share a configured directory while concurrent inference and
     for (const controller of controllers) controller.abort();
     for (const pending of parallelRequests.values()) pending.release.resolve();
     await settled;
+    await instance.close();
     parallelRequests = undefined;
   }
 });
@@ -699,4 +708,113 @@ test('audit12: discovered tool and sampling capabilities match native model meta
   assert.equal(models['text-only'].capabilities.toolcall, false);
   assert.equal(models['text-only'].capabilities.temperature, false);
   assert.equal(cfg.provider['opencode-bridge'].models['text-only'].tool_call, false);
+});
+
+
+test('reuse13: exclusive worker reuse resets request hooks and histories without extra inference', { timeout: 90000 }, async () => {
+  const reports = [];
+  const instance = new OpenCodeBridge({ ...options, workerReuse: true, maxIdleWorkers: 1, onDiagnostics: r => reports.push(r) });
+  const before = requests.length;
+  try {
+    for (const marker of ['REUSE_FIRST', 'REUSE_SECOND']) {
+      const response = await request({ messages: [{ role: 'system', content: marker + '_SYSTEM' }, { role: 'user', content: marker }], stream: true }, instance);
+      assert.equal(response.status, 200, response.status === 200 ? '' : await response.text());
+      const chunks = await Array.fromAsync(sseEvents(response.body));
+      assert.equal(chunks.some(c => c.error), false, JSON.stringify(chunks));
+      assert.equal(requests.at(-1).body.messages[0].content, marker + '_SYSTEM');
+      assert.equal(requests.at(-1).body.messages.at(-1).content, marker);
+      assert.ok(response.headers.get('x-opencode-request-id'));
+    }
+    assert.equal(requests.length, before + 2);
+    assert.equal(reports[0].workerReused, false);
+    assert.equal(new Set((await observations()).slice(-2).map(w => w.pid)).size, 1, 'Both completed requests must use the same real process');
+    assert.equal(reports[0].workerRetained, true);
+    assert.equal(reports[1].workerReused, true);
+    assert.equal(instance.pool.workers.size, 1);
+    const worker = [...instance.pool.workers][0];
+    const sessions = await fetch(worker.base + '/session', { headers: worker.headers }).then(r => r.json());
+    assert.deepEqual(sessions, [], 'Completed client sessions are deleted before returning the worker');
+    console.log(JSON.stringify({ reuse13: reports.map(r => ({ reused: r.workerReused, elapsedMs: r.elapsedMs, timings: r.timings })) }));
+  } finally { await instance.close(); }
+  assert.equal(instance.pool.workers.size, 0);
+});
+
+
+test('reuse13: prewarm never infers and reused workers replace tool schemas, history and permissions', { timeout: 90000 }, async () => {
+  const reports = [];
+  const instance = new OpenCodeBridge({ ...options, workerReuse: true, warmupModels: ['oc-default'], onDiagnostics: r => reports.push(r) });
+  const before = requests.length;
+  const tools = ['weather', 'clock'].map(name => ({type:'function',function:{name,parameters:{type:'object',properties:{city:{type:'string'}}}}}));
+  try {
+    await instance.prewarm();
+    assert.equal(requests.length, before, 'Prewarm must never start model inference');
+    assert.equal(reports[0].status, 'warmed');
+    assert.equal(instance.pool.idle.length, 1);
+    const response = await request({ messages: [{role:'user',content:'TOOLS_AFTER_PREWARM'}], tools }, instance);
+    const result = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(result));
+    assert.deepEqual(result.choices[0].message.tool_calls.map(t => t.function.name), ['weather','clock']);
+    assert.equal(reports.at(-1).workerReused, true);
+    const second = await request({ messages: [{role:'user',content:'NO_TOOLS_NEXT'}], tool_choice:'none', tools }, instance);
+    assert.equal(second.status, 200, await second.text());
+    assert.deepEqual(requests.at(-1).body.tools ?? [], []);
+    assert.equal(reports.at(-1).workerReused, true);
+    assert.equal(requests.length, before + 2, 'Tool deferral must not start a hidden continuation');
+    assert.equal(instance.pool.workers.size, 1);
+    const pooled = [...instance.pool.workers][0];
+    await assert.rejects(() => stat(pooled.requestFile), { code: 'ENOENT' });
+    await assert.rejects(() => stat(pooled.hookFile), { code: 'ENOENT' });
+  } finally { await instance.close(); }
+});
+
+test('reuse13: first-output and idle failures ignore vendor heartbeats and discard the worker', { timeout: 90000 }, async () => {
+  for (const [marker, expected] of [['TIMEOUT_FIRST','first_output'], ['TIMEOUT_IDLE','idle']]) {
+    const reports = [];
+    const instance = new OpenCodeBridge({ ...options, workerReuse: true, timeoutMs: 0, firstOutputTimeoutMs: 5000, idleTimeoutMs: 400, onFailure: undefined, onDiagnostics: r => reports.push(r) });
+    const before = requests.length;
+    try {
+      const response = await request({ messages:[{role:'user',content:marker}],stream:true }, instance);
+      const result = response.status === 200 ? (await Array.fromAsync(sseEvents(response.body))).find(c=>c.error) : await response.json();
+      assert.equal(response.status, expected === 'first_output' ? 504 : 200, JSON.stringify(result));
+      assert.equal(result.error.code, 'opencode_timeout');
+      assert.ok(result.error.message.includes(expected), result.error.message);
+      assert.equal(requests.length, before + 1);
+      assert.equal(reports.at(-1).timeoutKind, expected);
+      assert.equal(instance.pool.workers.size, 0);
+      assert.equal(instance.active, 0);
+      assert.equal(JSON.stringify(reports).includes(marker), false, 'Diagnostics must not log prompt content');
+      assert.equal(JSON.stringify(reports).includes('fixture-refreshed-access'), false);
+    } finally { await instance.close(); }
+  }
+});
+
+test('reuse13: idle expiry retires the process and removes its temporary database', { timeout: 60000 }, async () => {
+  const instance = new OpenCodeBridge({ ...options, workerReuse:true, workerIdleMs:200 });
+  try {
+    const response = await request({ messages:[{role:'user',content:'EXPIRING'}] },instance);
+    assert.equal(response.status,200,await response.text());
+    const worker = [...instance.pool.workers][0];
+    assert.ok(worker);
+    await delay(800);
+    assert.equal(instance.pool.workers.size,0);
+    await assert.rejects(() => stat(worker.home),{code:'ENOENT'});
+  } finally {await instance.close();}
+});
+
+test('reuse13: an idle worker that exited by signal is replaced before inference', { timeout: 60000 }, async () => {
+  const reports = [];
+  const instance = new OpenCodeBridge({ ...options, workerReuse: true, onDiagnostics: r => reports.push(r) });
+  const before = requests.length;
+  try {
+    const first = await request({ messages: [{ role: 'user', content: 'BEFORE_EXIT' }] }, instance);
+    assert.equal(first.status, 200, await first.text());
+    const prior = [...instance.pool.workers][0];
+    prior.child.kill();
+    await prior.worker.done;
+    const next = await request({ messages: [{ role: 'user', content: 'AFTER_EXIT' }] }, instance);
+    assert.equal(next.status, 200, await next.text());
+    assert.equal(reports.at(-1).workerReused, false);
+    assert.notEqual([...instance.pool.workers][0].child.pid, prior.child.pid);
+    assert.equal(requests.length, before + 2);
+  } finally { await instance.close(); }
 });

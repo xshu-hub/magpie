@@ -2,6 +2,13 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { ApiError, clientToolNames, toolPermissions, toNativeHistory } from './protocol.mjs';
 import { applyReasoning } from './reasoning.mjs';
 
+// Also retire a warm child if the plugin host is forcibly terminated.
+const parentPID = Number(process.env.MAGPIE_BRIDGE_PARENT_PID);
+if (Number.isInteger(parentPID) && parentPID > 0) {
+  const watch = setInterval(() => { try { process.kill(parentPID, 0); } catch (error) { if (error.code === 'ESRCH') process.exit(0); } }, 2000);
+  watch.unref?.();
+}
+
 // This is loaded through OpenCode's public plugin config, without patching OpenCode.
 export const BridgeWorker = async ({ directory }) => {
   let request;

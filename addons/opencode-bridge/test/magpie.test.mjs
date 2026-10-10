@@ -80,13 +80,13 @@ test('packaged addon on official Magpie supports cwd, tools, SSE and independent
     await writeFile(path.join(configDir, 'package.json'), JSON.stringify({ private: true, dependencies }));
     await writeFile(path.join(configDir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies }, 'node_modules/@opencode-ai/plugin': { version: manifest.version } } }));
     const recorder = path.join(configDir, 'directory-fixture.mjs');
-    await writeFile(recorder, `import { appendFile } from 'node:fs/promises';\nexport const DirectoryFixture = async ({directory}) => { await appendFile(${JSON.stringify(recordsFile)}, JSON.stringify({cwd:process.cwd(), directory, db:process.env.OPENCODE_DB}) + '\\n'); return {}; };\n`);
+    await writeFile(recorder, `import { appendFile } from 'node:fs/promises';\nexport const DirectoryFixture = async ({directory}) => { await appendFile(${JSON.stringify(recordsFile)}, JSON.stringify({cwd:process.cwd(), directory, db:process.env.OPENCODE_DB}) + '\\n'); return { 'chat.params': async input => { await appendFile(${JSON.stringify(recordsFile)}, JSON.stringify({kind:'inference',sessionID:input.sessionID,cwd:process.cwd(),directory,db:process.env.OPENCODE_DB,pid:process.pid}) + '\\n'); } }; };\n`);
     await new Promise(r => upstream.listen(0, '127.0.0.1', r));
     const config = JSON.stringify({ $schema: 'https://opencode.ai/config.json', model: 'fixture/' + modelID, plugin: [pathToFileURL(recorder).href], provider: { fixture: { npm: '@ai-sdk/openai-compatible', options: { baseURL: `http://127.0.0.1:${upstream.address().port}/v1` }, models: { [modelID]: { reasoning: true, options: { reasoningEffort: 'xhigh' }, variants: Object.fromEntries(['none', 'low', 'high', 'max'].map(e => [e, { reasoningEffort: e }])), limit: { context: 100000, output: 1000 } } } } } });
     await writeFile(path.join(configDir, 'opencode.json'), config);
     await writeFile(path.join(dataDir, 'auth.json'), JSON.stringify({ fixture: { type: 'api', key: 'fixture-key' } }));
     const bridgeConfig = path.join(profile, 'bridge.json');
-    await writeFile(bridgeConfig, JSON.stringify({ mode: 'global', command, workingDirectory: './' + path.basename(workspace), timeoutMs: 60000 }));
+    await writeFile(bridgeConfig, JSON.stringify({ mode: 'global', command, workingDirectory: './' + path.basename(workspace), timeoutMs: 60000, workerIdleMs: 3000 }));
     const probe = http.createServer();
     await new Promise(r => probe.listen(0, '127.0.0.1', r));
     const port = probe.address().port;
@@ -156,7 +156,13 @@ test('packaged addon on official Magpie supports cwd, tools, SSE and independent
     for (const [i, effort] of ['none', 'low', 'high', 'max'].entries()) assert.equal(upstreamEfforts.find(r => r.marker === 'parallel-' + i)?.effort, effort, 'Concurrent requests must not inherit another request\'s effort');
     const records = (await readFile(recordsFile, 'utf8')).trim().split('\n').map(JSON.parse);
     const databases = new Set(records.map(r => r.db));
-    assert.ok(databases.size >= 9, 'Discovery and every request must have their own databases');
+    const inferred = records.filter(r => r.kind === 'inference');
+    assert.equal(inferred.length, 9);
+    assert.equal(new Set(inferred.map(r => r.sessionID)).size, 9, 'Every call has a fresh session');
+    assert.equal(new Set(inferred.slice(0, 5).map(r => r.pid)).size, 1, 'Sequential JSON/SSE/tool requests reuse a process');
+    assert.equal(new Set(inferred.slice(5).map(r => r.pid)).size, 4, 'Concurrent calls use separate exclusive workers');
+    const expireAt = Date.now() + 10000;
+    while ((await Promise.all([...databases].map(db => stat(db).then(() => true, () => false)))).some(Boolean) && Date.now() < expireAt) await delay(100);
     for (const record of records) {
       assert.equal(await realpath(record.cwd), await realpath(workspace));
       assert.equal(await realpath(record.directory), await realpath(workspace));
@@ -165,7 +171,7 @@ test('packaged addon on official Magpie supports cwd, tools, SSE and independent
     assert.equal(await readFile(path.join(workspace, 'keep.txt'), 'utf8'), 'user-owned workspace');
     assert.equal(await readFile(path.join(workspace, 'opencode.json'), 'utf8'), '{"model":"project-must-not-load/missing"}');
     assert.equal(await readFile(path.join(configDir, 'opencode.json'), 'utf8'), config);
-    const report = { addonVersion: pkg.version, magpieVersion, officialMagpieUnmodified: true, officialMagpieSHA256: await hash(executable), addonSHA256: await hash(process.env.TEST_BRIDGE_PACKAGE), opencodeVersion: process.env.TEST_OPENCODE_VERSION, upstream: 'loopback fixture with saved global API key', modelsDiscovered: true, shortModelIDs: true, legacyQualifiedIDAccepted: true, ordinaryResponse: true, streaming: true, toolsAndContinuation: true, concurrentRequests: 4, reasoningEffortsForwarded: true, explicitEffortOverridesDefault: true, concurrentEffortIsolation: true, independentDatabases: databases.size, actualDirectoryObservedByOpenCodePlugin: true, existingWorkspaceFilesPreserved: true, projectConfigDisabled: true, userGlobalConfigurationUntouched: true, passed: true };
+    const report = { addonVersion: pkg.version, magpieVersion, officialMagpieUnmodified: true, officialMagpieSHA256: await hash(executable), addonSHA256: await hash(process.env.TEST_BRIDGE_PACKAGE), opencodeVersion: process.env.TEST_OPENCODE_VERSION, upstream: 'loopback fixture with saved global API key', modelsDiscovered: true, shortModelIDs: true, legacyQualifiedIDAccepted: true, ordinaryResponse: true, streaming: true, toolsAndContinuation: true, concurrentRequests: 4, reasoningEffortsForwarded: true, explicitEffortOverridesDefault: true, concurrentEffortIsolation: true, physicalDatabases: databases.size, workerReuse: true, freshSessionPerRequest: true, independentConcurrentDatabases: true, actualDirectoryObservedByOpenCodePlugin: true, existingWorkspaceFilesPreserved: true, projectConfigDisabled: true, userGlobalConfigurationUntouched: true, passed: true };
     if (process.env.TEST_MAGPIE_REPORT) await writeFile(process.env.TEST_MAGPIE_REPORT, JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report));
   } finally {

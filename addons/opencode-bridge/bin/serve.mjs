@@ -72,7 +72,9 @@ const server = http.createServer(async (req, res) => {
 server.requestTimeout = 30000;
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
 console.log(`OpenCode bridge listening on http://127.0.0.1:${server.address().port}/v1`);
+void bridge.prewarm().catch(() => { if (config.diagnostics) console.error('[opencode-bridge] Worker prewarm failed.'); });
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
   for (const controller of controllers) controller.abort();
+  void bridge.close();
   server.close(); server.closeAllConnections();
 });

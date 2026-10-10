@@ -17,6 +17,7 @@ export const OpenCodeBridgePlugin = async (_, options = {}) => {
   const variants = model => Object.fromEntries((model.reasoningEfforts ?? []).map(effort => [effort, {}]));
   const definitions = models => Object.fromEntries(Object.entries(models).map(([name, model]) => [name, { name: model.name ?? name, limit: { context: model.context, output: model.output }, modalities: { input: ['text'], output: ['text'] }, temperature: model.temperature !== false, tool_call: model.toolcall !== false, reasoning: model.reasoning === true, variants: variants(model) }]));
   return {
+    dispose: async () => bridge.close(),
     config: async (cfg) => {
       cfg.provider ??= {};
       cfg.provider[id] = {
@@ -26,6 +27,7 @@ export const OpenCodeBridgePlugin = async (_, options = {}) => {
       // Register the transport before discovery. A startup failure must remain
       // a catalog/startup error instead of becoming a missing gateway endpoint.
       cfg.provider[id].models = definitions(await bridge.loadModels());
+      void bridge.prewarm().catch(() => { if (config.diagnostics) console.error('[opencode-bridge] Worker prewarm failed; requests will use a fresh worker.'); });
     },
     provider: {
       id,

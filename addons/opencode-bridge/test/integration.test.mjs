@@ -35,7 +35,7 @@ const upstream = http.createServer(async (req, res) => {
   res.end('data: [DONE]\n\n');
 });
 await new Promise(r => upstream.listen(0, '127.0.0.1', r));
-const config = { command: JSON.parse(command), maxConcurrent: 1, timeoutMs: 30000, startupTimeoutMs: 15000, models: { 'oc-mock': { protocol: 'openai-chat', baseURL: `http://127.0.0.1:${upstream.address().port}/v1`, id: 'mock', context: 100000, output: 1000 } } };
+const config = { workerReuse: false, diagnostics: false, command: JSON.parse(command), maxConcurrent: 1, timeoutMs: 30000, startupTimeoutMs: 15000, models: { 'oc-mock': { protocol: 'openai-chat', baseURL: `http://127.0.0.1:${upstream.address().port}/v1`, id: 'mock', context: 100000, output: 1000 } } };
 config.onFailure = async ({ phase, home, output }) => {
   console.log('OpenCode fixture failure stage:', phase, 'output:', output);
   const dir = path.join(home, 'data', 'opencode', 'log');
@@ -113,4 +113,18 @@ test('invalid parameter cannot reach the upstream', async () => {
   assert.equal(response.status, 400);
   assert.equal(requests.length, before);
 });
+test('reused isolated workers keep different upstream credentials in separate processes', { timeout: 60000 }, async () => {
+  const reports = [];
+  const selected = new OpenCodeBridge({ ...config, workerReuse: true, onDiagnostics: r => reports.push(r) });
+  try {
+    for (const key of ['fixture-key-a', 'fixture-key-a', 'fixture-key-b']) {
+      const response = await selected.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'oc-mock', messages: [{ role: 'user', content: 'Hello' }] }) }, key);
+      assert.equal(response.status, 200, await response.text());
+      assert.equal(requests.at(-1).auth, 'Bearer ' + key);
+    }
+    assert.deepEqual(reports.map(r => r.workerReused), [false, true, false]);
+    assert.equal(selected.pool.workers.size, 2);
+  } finally { await selected.close(); }
+});
+
 test('cleanup fixture server', async () => { upstream.closeAllConnections(); await new Promise(r => upstream.close(r)); });

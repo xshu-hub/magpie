@@ -39,7 +39,9 @@ magpie serve
   "mode": "global",
   "command": ["opencode"],
   "maxConcurrent": 0,
-  "timeoutMs": 120000,
+  "timeoutMs": 0,
+  "firstOutputTimeoutMs": 120000,
+  "idleTimeoutMs": 180000,
   "startupTimeoutMs": 30000
 }
 ```
@@ -129,7 +131,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 
 已有 `config.json` 时添加 `workingDirectory` 字段即可，保留其他配置。保存后重启 Magpie，或停用再启用插件。Windows 可使用上述正斜杠路径，也可写 `"D:\\workspace"`。相对路径以配置文件所在目录为基准；路径不展开 `%TEMP%`、`$HOME` 或 `~`。未设置时保持临时目录行为。目录必须存在，不能是文件；无效目录返回包含路径的 `503 opencode_working_directory`，不会自动创建或退回临时目录。独立服务和隔离模式也支持该字段。
 
-指定目录同时用于真实 OpenCode 的模型发现与推理进程 cwd。会话数据库、请求文件和 hooks 确认文件仍放在每个请求自己的临时目录，清理不会删除指定目录及其现有文件。所有并发请求共享所选 cwd，但进程、会话数据库、MCP 服务和取消信号各自独立。该设置由网关管理员控制，客户端不能通过 Chat API 选择服务器目录。
+指定目录同时用于真实 OpenCode 的模型发现与推理进程 cwd。会话数据库、请求文件和 hooks 确认文件放在 worker 的临时目录，清理不会删除指定目录及其现有文件。成功请求删除会话与请求文件、释放 OpenCode 实例后可复用进程；并发请求的进程、会话数据库、MCP 服务和取消信号各自独立。该设置由网关管理员控制，客户端不能通过 Chat API 选择服务器目录。
 
 指定工作目录不启用项目级 `opencode.json` / `.opencode` 配置读取；桥接仍设置 `OPENCODE_DISABLE_PROJECT_CONFIG=1`，全局模式复用全局供应商配置和登录。它也不打开内置文件、终端或其他本地工具；客户端 function 工具仍由客户端执行。OpenCode 及已加载的全局插件自身可能对目录执行额外操作，这部分行为由它们负责。
 
@@ -137,7 +139,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:3425/v1/chat/completions' -Method Post 
 
 内置工具和其他 MCP 服务在这个 API worker 内禁用。0.11.0 将工具权限收窄为本次请求注册的精确客户端工具名，并在工具执行前再次检查；全局插件中仅以 `bridge_` 开头的本地工具不会因此获得权限。`tool_choice: none` 不放行任何客户端工具。客户端函数以 MCP 形式注册；调用时只返回“交由客户端执行”的内部确认，不执行函数。标准 SDK 完成整批调用后发布 `step-finish`。公开的消息 hook 阻止下一轮模型推理，网关据该事件返回工具调用并取消 worker；该内部确认不会发送给客户端，也不会被用于下一次供应商推理。下一次请求重新注入完整历史和客户端的真实结果。
 
-默认不限制并发，每个请求使用独立的 OpenCode 进程、会话数据库、MCP 服务和取消信号。未指定工作目录时，cwd 也独立。取消一个请求只清理该请求的 worker。`maxConcurrent` 省略或设为 `0` 均表示不限；只有显式设置正整数时才限制活动请求数，满时返回 429。升级已有配置时，把旧的 `maxConcurrent: 1` 删除或改为 `0`。
+默认不限制并发。每个活动请求独占 OpenCode 进程、会话数据库、MCP 服务和取消信号；成功后可复用空闲进程，每次重建实例及新会话。未指定工作目录时使用 worker 临时 cwd。取消一个请求只清理它独占的 worker。`maxConcurrent` 省略或设为 `0` 均表示不限；只有显式设置正整数时才限制活动请求数，满时返回 429。升级已有配置时，把旧的 `maxConcurrent: 1` 删除或改为 `0`。
 
 全局登录与认证插件仍由各 OpenCode worker 复用；共享登录文件的并发刷新行为由 OpenCode 及供应商认证插件决定。并发验收覆盖已存 API Key 和已刷新的 OAuth 登录，不保证每个第三方插件在同一时刻刷新凭证的行为。
 
@@ -167,7 +169,7 @@ Cherry Studio 2.0.14 会在历史 assistant 消息中附带 `reasoning_content: 
 
 OpenCode Zen 免费模型存在额外使用检查，模型被枚举出来不表示网关请求一定获准。2026-10-09 在同一个全局 OpenCode 1.18.0 中实测：Muse Spark 1.3 Free 通过默认 `opencode run` 成功；仅配置 `permission: { "*": "deny" }` 即返回 `OpenCode's free tier can only be used from within OpenCode`。桥接为让客户端执行 function 工具，禁用 OpenCode 内置本地工具并替换其代理提示，因此该模型目前不能按本桥接的普通 Chat API 行为使用。仅升级版本不能解决这个差异；服务端具体检查规则未公开，不保证其他免费模型行为相同。
 
-每次请求有启动开销，未实现 worker 池。超时包含初始化时间。启动检查会确认 HTTP 事件连接，并确认消息与参数 hooks 已执行；不检查版本白名单。`x-opencode-version` 响应头记录服务器实际报告的版本，未报告时省略。历史注入与事件转换仍依赖 OpenCode 的公开实验 hooks，因此不限制版本不等于已经验证所有版本。程序若不提供这些能力，将返回接口或 hook 兼容错误。
+冷请求有启动开销；0.13.0 默认复用空闲 worker。启动、首次有效输出、流空闲分阶段计时，总超时默认关闭。启动检查会确认 HTTP 事件连接，并确认消息与参数 hooks 已执行；不检查版本白名单。`x-opencode-version` 响应头记录服务器实际报告的版本，未报告时省略。历史注入与事件转换仍依赖 OpenCode 的公开实验 hooks，因此不限制版本不等于已经验证所有版本。程序若不提供这些能力，将返回接口或 hook 兼容错误。
 
 接入不要求指定某家供应商。自动验收使用真实官方 1.16.2 / 1.18.35、真实 Magpie/Bun 宿主，以及临时全局登录文件和本地模拟供应商；覆盖已存 API Key、自定义 OAuth 插件的 token 刷新、标准 SDK 的工具批次与结果续接。另外已在 Windows 上用现有全局 1.16.2 和真实自定义供应商完成普通回复、SSE 流式、工具调用、工具结果续接四项联网测试，全局供应商配置未变。发现的 Windows npm manifest UTF-8 BOM 解析问题已修复并加入回归测试。真实订阅账号、每个第三方认证插件和其他版本没有全部验证；目标账号首先须能在同一个全局 OpenCode 中正常推理。
 
@@ -217,6 +219,25 @@ worker 配置钩子清空额外 instructions 和 skills.paths/urls，避免为�
 
 流中超时保留 opencode_timeout；尚未发送 SSE 时返回 HTTP 504，已开始 SSE 时发送错误事件并关闭流。请求取消与上游错误分开呈现。Token 上限错误包含请求值、允许上限和实际字段名。原版 Magpie 仍可能包装错误字段；HTTP 499 仍表示客户端请求取消，不能据此确定等待慢的根因。
 
-分块测试让上游在输出思考、中文、Emoji 和代码块开头后暂停，确认客户端此时已收到内容，再逐块输出 40 行代码；检查无丢失、无重复、唯一结束标记、usage，以及原有取消清理和并发工具续接。保留默认 120 秒总超时和每请求独立 OpenCode 进程；未引入并发限制或进程池。
+分块测试让上游在输出思考、中文、Emoji 和代码块开头后暂停，确认客户端此时已收到内容，再逐块输出 40 行代码；检查无丢失、无重复、唯一结束标记、usage，以及原有取消清理和并发工具续接。上述 0.12.0 验证采用 120 秒总超时与单次进程；0.13.0 的时限与复用行为见下文。
 
 工具 schema 还有一项原生差异：已测试的 OpenCode MCP 转换会把参数根对象的 additionalProperties 强制设为 false，即使客户端省略它或传 true；嵌套字段的设置保留。因此依赖任意顶层参数名的函数不能认为与原生 OpenAI 等价。当前 MCP 路径没有可用的公开 schema 覆盖钩子；桥接未修改 OpenCode 来绕过这个限制。
+
+## 0.13.0 分阶段时限、诊断和进程复用
+
+- startupTimeoutMs 默认 30000：worker 准备、接口与 MCP/事件连接阶段。模型目录发现也有自身启动时限。
+- firstOutputTimeoutMs 默认 120000：提交推理后等待第一个模型内容/工具事件。不是等待第一条 HTTP 心跳。
+- idleTimeoutMs 默认 180000：收到模型内容后，连续没有新的文本、思考或工具状态进展的上限。OpenCode/上游心跳不会刷新它。
+- timeoutMs 默认 0：关闭总时长上限；显式正数仍生效。旧 config.json 保留 120000 就仍有两分钟总上限，升级时需删除该字段或设 0。
+
+workerReuse 默认 true；池中没有可用 worker 时立即新建，不排队、不增加并发上限。maxIdleWorkers 默认 2 只限制保留的空闲进程数，workerIdleMs 默认 60000 到期销毁进程及临时目录。workerReuse:false 恢复单次进程。并发请求永远不共用活动进程。
+
+成功后先取消原会话、删除会话，再调用 OpenCode 公开 /instance/dispose 接口释放插件/配置/MCP 实例状态；清除请求与 hook 文件后保留服务进程。下一次写入新请求、替换工具目录、重新初始化插件和精确工具权限，创建新会话。复用按供应商模型、工作目录、命令及进程环境分组；隔离模式还区分凭证。取消、超时、请求失败、重置失败的 worker 不复用。无重置接口的运行时退回销毁进程，不按版本名单拒绝。
+
+数据库文件在进程空闲期间可能保留，即使旧会话已删除；不承诺 SQLite 空闲页立即物理擦除。进程到期或正常关闭时移除临时目录，强制杀死宿主可能留下临时文件。全局凭证依然由 OpenCode 自己维护。全局配置/认证插件变化后重启 Magpie；状态复杂的第三方插件可以关闭复用。
+
+可选 warmupModels 数组指定启动时预热的模型 ID（插件列表中的名称，不带 Magpie 的 opencode-bridge/ 前缀）。默认 []，通常首个请求启动、后续自动复用。例如 warmupModels:["gpt-6.1-sol"]。预热只启动服务并连接 MCP，绝不创建推理，不消耗模型调用；最多预热 maxIdleWorkers 个模型，忙时跳过。预热仅用于全局模式，显式并发限额开启时不抢占活动配额。
+
+diagnostics 默认 true，每个请求结束后输出一条 [opencode-bridge] JSON，包含 requestId、阶段进入时间（相对 worker 准备开始的毫秒）、目录发现耗时、总耗时、firstModelEvent、firstClientChunk（流式）、completion、workerReused/workerRetained、timeoutKind 和稳定错误码。不会写入消息、工具参数、密钥、供应商响应或环境变量。false 可关闭默认日志；开发调用可用 onDiagnostics 接收脱敏对象。独立服务/插件响应带 x-opencode-request-id 和 Server-Timing，外层 Magpie 是否转发自定义头由其协议层决定；Chat completion id 也包含该请求 ID。已开始 SSE 的错误仍通过错误事件返回。
+
+真实工具参数逐字符流式仍不可用：已审查的 OpenCode 处理器接收 tool-input-delta 后没有把片段发布到会话事件。当前公开插件 hooks 不提供该原始响应流；认证 fetch 包装会涉及供应商和认证插件兼容性，未作为通用方案替换。此次没有修改 OpenCode、伪造参数增量、把断流包装成正常结束或在已输出后重放推理。

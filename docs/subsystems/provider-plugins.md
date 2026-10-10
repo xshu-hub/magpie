@@ -89,7 +89,8 @@ global, unmodified OpenCode installation with its existing
 configuration, login and authentication plugins. OpenCode owns upstream calls
 and persists token refreshes in its genuine auth store; the bridge does not
 implement supplier authentication. Session databases and request files remain
-temporary. Workspaces default to a per-worker temporary directory; the optional
+temporary; 0.13.0 retains idle process databases until worker retirement, while
+deleting completed sessions and request/hook files between leases. Workspaces default to a per-worker temporary directory; the optional
 `workingDirectory` setting uses an existing administrator-selected cwd for both
 catalog discovery and inference. Relative paths resolve against the bridge
 config file. Missing paths and files return a specific directory error before
@@ -190,3 +191,19 @@ Client tool descriptions identify the original function alongside the internal
 registered name. Timeout reasons survive a native event-fetch abort in both JSON
 and SSE paths; errors after SSE headers remain stream error events, not new HTTP
 statuses. Token-limit errors identify the value, ceiling and supplied field.
+
+OpenCode bridge 0.13.0 uses exclusive worker leases with no new active concurrency
+limit. An idle retention cap is separate from request admission. Completed workers
+delete the session and call the public instance-dispose endpoint before reuse;
+each lease reloads its request, MCP tools, permissions and hooks in a new instance.
+Errors, cancellation, reset failure and idle expiry retire the process. Optional
+global warmupModels starts idle servers without inference. The addon exposes a
+dispose hook and standalone shutdown closes the pool; parent-liveness checks also
+stop an initialized child after forced host termination, without guaranteeing
+temporary-file removal after a forced kill.
+Startup, first-model-output, stream-idle and optional total deadlines are separate.
+Only content/tool progress resets idle, never heartbeat events. The legacy
+timeoutMs setting remains an explicit total cap, but defaults to zero. Structured
+diagnostics record stages and opaque request IDs without prompts, keys or tool
+arguments. Raw tool argument deltas remain unavailable through the tested native
+session event path; no direct-upstream or patched-client fallback was added.
