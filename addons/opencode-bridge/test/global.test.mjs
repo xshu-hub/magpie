@@ -818,3 +818,19 @@ test('reuse13: an idle worker that exited by signal is replaced before inference
     assert.equal(requests.length, before + 2);
   } finally { await instance.close(); }
 });
+
+test('reuse13: a slow downstream reader does not idle-timeout an upstream that has completed', { timeout: 60000 }, async () => {
+  const instance = new OpenCodeBridge({ ...options, workerReuse: true, timeoutMs: 0, idleTimeoutMs: 700, firstOutputTimeoutMs: 5000, onFailure: undefined });
+  auditStream = { started: Promise.withResolvers(), release: Promise.withResolvers(), tail: Array.from({length:40},(_,i)=>'line '+i+'\n') };
+  try {
+    const response = await request({ messages:[{role:'user',content:'AUDIT_INCREMENTAL'}],stream:true },instance);
+    assert.equal(response.status,200);
+    await auditStream.started.promise;
+    auditStream.release.resolve();
+    await delay(1500); // Do not consume the body while the upstream completes.
+    const chunks = await Array.fromAsync(sseEvents(response.body));
+    assert.equal(chunks.some(c=>c.error),false,JSON.stringify(chunks));
+    assert.equal(chunks.at(-1).choices[0].finish_reason,'stop');
+    assert.equal(chunks.map(c=>c.choices[0]?.delta?.content??'').join(''),'你好🙂\n\n```python\n'+auditStream.tail.join(''));
+  } finally {auditStream.release.resolve();await instance.close();}
+});

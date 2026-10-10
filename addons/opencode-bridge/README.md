@@ -240,4 +240,6 @@ workerReuse 默认 true；池中没有可用 worker 时立即新建，不排队�
 
 diagnostics 默认 true，每个请求结束后输出一条 [opencode-bridge] JSON，包含 requestId、阶段进入时间（相对 worker 准备开始的毫秒）、目录发现耗时、总耗时、firstModelEvent、firstClientChunk（流式）、completion、workerReused/workerRetained、timeoutKind 和稳定错误码。不会写入消息、工具参数、密钥、供应商响应或环境变量。false 可关闭默认日志；开发调用可用 onDiagnostics 接收脱敏对象。独立服务/插件响应带 x-opencode-request-id 和 Server-Timing，外层 Magpie 是否转发自定义头由其协议层决定；Chat completion id 也包含该请求 ID。已开始 SSE 的错误仍通过错误事件返回。
 
+原生事件读取独立于客户端消费速度；空闲计时跟随实际读取到的模型进展，模型结束后停止空闲计时。客户端暂停读取不会把已完成的上游误报成 idle timeout。缓冲的事件 JSON 总量上限为 8 MiB，超过后明确报 slow_consumer 并终止请求，不无限积压；显式总超时仍可约束慢客户端。该缓冲不把正常响应整段攒齐后才发送。
+
 真实工具参数逐字符流式仍不可用：已审查的 OpenCode 处理器接收 tool-input-delta 后没有把片段发布到会话事件。当前公开插件 hooks 不提供该原始响应流；认证 fetch 包装会涉及供应商和认证插件兼容性，未作为通用方案替换。此次没有修改 OpenCode、伪造参数增量、把断流包装成正常结束或在已输出后重放推理。

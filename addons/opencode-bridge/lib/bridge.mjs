@@ -12,6 +12,7 @@ import { modelCatalog } from './models.mjs';
 import { workerConfig } from './config.mjs';
 import { RequestLifecycle } from './lifecycle.mjs';
 import { WorkerPool } from './pool.mjs';
+import { bufferEvents } from './events.mjs';
 
 const reusedHeader = run => !!run.reused;
 const timingHeader = run => {
@@ -312,9 +313,10 @@ export class OpenCodeBridge {
     let home, mcp, worker, sessionID, eventController, requestFile, hookFile, base, headers;
     let reportedVersion;
     let phase = 'creating sandbox';
-    let closing, api, failure;
+    let closing, api, failure, abortCleanup;
     const cleanup = (success = false) => closing ??= (async () => {
       lifecycle.stop();
+      if (abortCleanup) combined.removeEventListener('abort', abortCleanup);
       eventController?.abort();
       let retained = false;
       let recycleError;
@@ -329,7 +331,27 @@ export class OpenCodeBridge {
             }
             // Reset every instance-owned plugin/config/MCP cache. The next lease
             // reads a new request file and cannot reuse injected history flags.
-            await api('/instance/dispose', {}, AbortSignal.timeout(3000));
+            // Newer runtimes acknowledge disposal before teardown finishes.
+            // Observe its completion before another request can lease the worker.
+            const resetController = new AbortController();
+            const resetSignal = AbortSignal.any([resetController.signal, AbortSignal.timeout(5000)]);
+            let resetEvents;
+            try {
+              const response = await fetch(base + '/event', { headers, signal: resetSignal });
+              if (!response.ok || !response.body) throw new Error('Reset event stream unavailable');
+              resetEvents = sseEvents(response.body);
+              const connected = await resetEvents.next();
+              if (connected.done || connected.value.type !== 'server.connected') throw new Error('Reset event stream not ready');
+              await api('/instance/dispose', {}, resetSignal);
+              let disposed = false;
+              for await (const event of resetEvents) {
+                if (event.type === 'server.instance.disposed') { disposed = true; break; }
+              }
+              if (!disposed) throw new Error('Instance disposal was not confirmed');
+            } finally {
+              resetController.abort();
+              await resetEvents?.return().catch(() => {});
+            }
             await rm(requestFile, { force: true });
             await rm(hookFile, { force: true });
             mcp.setTools({});
@@ -347,7 +369,8 @@ export class OpenCodeBridge {
         this.controllers.delete(controller);
         const reason = failure ?? combined.reason;
         const errorCode = reason instanceof ApiError ? reason.code : combined.aborted ? 'request_cancelled' : reason ? 'opencode_error' : undefined;
-        const report = lifecycle.report({ status: success ? warmup ? 'warmed' : 'completed' : combined.aborted && !lifecycle.timeoutKind ? 'cancelled' : 'failed', errorCode, workerReused: reused, workerRetained: retained, recycleError });
+        const cancelled = combined.aborted && (reason instanceof ApiError ? reason.status === 499 : !lifecycle.timeoutKind);
+        const report = lifecycle.report({ status: success ? warmup ? 'warmed' : 'completed' : cancelled ? 'cancelled' : 'failed', errorCode, workerReused: reused, workerRetained: retained, recycleError });
         if (this.config.diagnostics) console.error('[opencode-bridge] ' + JSON.stringify(report));
         try { await this.config.onDiagnostics?.(report); } catch {}
       }
@@ -474,7 +497,7 @@ export class OpenCodeBridge {
         if (buffered.length > 1024) throw new ApiError('OpenCode emitted model events without confirming the required hooks.', 503, null, 'opencode_hooks_incompatible');
         pending = nextEvent();
       }
-      const events = (async function* () {
+      const nativeEvents = (async function* () {
         try {
           yield* buffered;
           const next = await pending;
@@ -483,7 +506,11 @@ export class OpenCodeBridge {
         } finally { await iterator.return(); }
       })();
       phase = lifecycle.stage('waiting for output');
-      return { events, sessionID, cleanup, signal: combined, version: reportedVersion, lifecycle, reused, progress: () => lifecycle.progress(), complete: () => lifecycle.complete(), cancel: () => controller.abort(new ApiError('Request cancelled.', 499, null, 'request_cancelled')), abort: () => api(`/session/${sessionID}/abort`, {}, AbortSignal.timeout(2000)),
+      const events = bufferEvents(nativeEvents, { sessionID, lifecycle, abort: error => controller.abort(error), stop: () => eventController.abort() });
+      abortCleanup = () => { void cleanup().catch(() => {}); };
+      combined.addEventListener('abort', abortCleanup, { once: true });
+      combined.throwIfAborted();
+      return { events, sessionID, cleanup, signal: combined, version: reportedVersion, lifecycle, reused, complete: () => lifecycle.complete(), cancel: () => controller.abort(new ApiError('Request cancelled.', 499, null, 'request_cancelled')), abort: () => api(`/session/${sessionID}/abort`, {}, AbortSignal.timeout(2000)),
         diagnose: async details => { failure = details.error; if (typeof this.config.onFailure === 'function') await this.config.onFailure({ phase, home, output: worker?.output ?? '', ...details }).catch(() => {}); },
       };
     } catch (error) {
@@ -568,7 +595,6 @@ export class OpenCodeBridge {
     const names = new Map((body.tools ?? []).map(t => [nativeToolName(t.function.name), t.function.name]));
     const toolIDs = new Set();
     const textParts = new Map();
-    const pendingTools = new Set();
     const assistantIDs = new Set();
     const trace = [];
     let finished = false;
@@ -592,7 +618,7 @@ export class OpenCodeBridge {
         if (event.type === 'session.idle') throw new ApiError('OpenCode ended without a model completion.', 502);
         if (event.type === 'message.part.delta' && assistantIDs.has(p.messageID) && p.field === 'text') {
           const state = textParts.get(p.partID);
-          if (state) { if (p.delta) run.progress?.(); state.sent += p.delta; yield chunk({ [state.type === 'reasoning' ? 'reasoning_content' : 'content']: p.delta }); }
+          if (state) { state.sent += p.delta; yield chunk({ [state.type === 'reasoning' ? 'reasoning_content' : 'content']: p.delta }); }
         }
         if (event.type !== 'message.part.updated' || !assistantIDs.has(p.part?.messageID)) continue;
         const part = p.part;
@@ -602,14 +628,11 @@ export class OpenCodeBridge {
           const delta = part.text.slice(state.sent.length);
           state.sent = part.text;
           textParts.set(part.id, state);
-          if (delta) run.progress?.();
           if (delta) yield chunk({ [part.type === 'reasoning' ? 'reasoning_content' : 'content']: delta });
         }
-        if (part.type === 'tool' && part.state.status === 'pending' && !pendingTools.has(part.callID)) { pendingTools.add(part.callID); run.progress?.(); }
         if (part.type === 'tool' && part.state.status === 'running' && !toolIDs.has(part.callID)) {
           const name = names.get(part.tool);
           if (!name) throw new ApiError('OpenCode attempted an unregistered local tool.', 502, null, 'unregistered_tool');
-          run.progress?.();
           const index = toolIDs.size;
           toolIDs.add(part.callID);
           yield chunk({ tool_calls: [{ index, id: part.callID, type: 'function', function: { name, arguments: JSON.stringify(part.state.input) } }] });

@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { normalizeConfig } from '../lib/bridge.mjs';
 import { RequestLifecycle } from '../lib/lifecycle.mjs';
 import { WorkerPool } from '../lib/pool.mjs';
+import { bufferEvents } from '../lib/events.mjs';
 
 test('default requests have separate first-output/idle deadlines and no total or concurrency cap', () => {
   const cfg = normalizeConfig({ mode: 'global' });
@@ -34,6 +35,11 @@ test('first output, idle and total deadlines are distinct and real progress rese
   for (let i = 0; i < 4; i++) { total.progress(); await delay(30); }
   assert.equal(total.timeoutKind, 'total');
   total.stop();
+  const stalled = new RequestLifecycle({ ...cfg, timeoutMs: 60 });
+  stalled.inference(); stalled.progress(); stalled.complete();
+  await delay(100);
+  assert.equal(stalled.timeoutKind, 'total', 'Explicit total deadline still bounds a stalled downstream after native completion');
+  stalled.stop();
 });
 
 test('idle retention does not restrict active workers and concurrent releases keep only the configured idle count', async () => {
@@ -50,4 +56,16 @@ test('idle retention does not restrict active workers and concurrent releases ke
   assert.equal(pool.workers.size, 0);
   assert.equal(disposed.size, 6);
   await pool.close();
+});
+
+test('native event buffering rejects slow consumers at its byte limit without unbounded growth', async () => {
+  let aborted, stopped = false;
+  const source = (async function* () {
+    yield {type:'message.updated',properties:{info:{id:'m',role:'assistant',sessionID:'s'}}};
+    yield {type:'message.part.updated',properties:{part:{id:'p',messageID:'m',sessionID:'s',type:'text',text:'x'.repeat(1000)}}};
+  })();
+  const events = bufferEvents(source,{sessionID:'s',lifecycle:{progress(){},complete(){},stop(){}},abort:e=>{aborted=e;},stop:()=>{stopped=true;},limit:500});
+  await assert.rejects(async()=>{for await(const event of events) {}}, e=>e.code==='slow_consumer');
+  assert.equal(aborted.code,'slow_consumer');
+  assert.equal(stopped,true);
 });

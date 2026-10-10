@@ -41,11 +41,11 @@ export class RequestLifecycle {
     this.phase = 'streaming';
     this.arm('idle', this.config.idleTimeoutMs);
   }
-  clientOutput() { this.stage('firstClientChunk'); this.phase = 'streaming'; }
+  clientOutput() { this.stage('firstClientChunk'); this.phase = this.completed ? 'completion' : 'streaming'; }
   complete() {
     this.completed = true;
     this.stage('completion');
-    this.stop();
+    clearTimeout(this.stageTimer);
   }
   stop() { clearTimeout(this.stageTimer); clearTimeout(this.totalTimer); }
   report(extra = {}) {

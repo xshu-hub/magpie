@@ -207,3 +207,7 @@ timeoutMs setting remains an explicit total cap, but defaults to zero. Structure
 diagnostics record stages and opaque request IDs without prompts, keys or tool
 arguments. Raw tool argument deltas remain unavailable through the tested native
 session event path; no direct-upstream or patched-client fallback was added.
+Native event reading runs independently of downstream consumption, so downstream
+backpressure does not reset or falsely trigger the upstream idle watchdog. An
+8 MiB serialized-event buffer bounds accumulation; overflow aborts with a
+slow_consumer error. Completion disarms idle but not an explicit total deadline.
