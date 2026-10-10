@@ -331,27 +331,9 @@ export class OpenCodeBridge {
             }
             // Reset every instance-owned plugin/config/MCP cache. The next lease
             // reads a new request file and cannot reuse injected history flags.
-            // Newer runtimes acknowledge disposal before teardown finishes.
-            // Observe its completion before another request can lease the worker.
-            const resetController = new AbortController();
-            const resetSignal = AbortSignal.any([resetController.signal, AbortSignal.timeout(5000)]);
-            let resetEvents;
-            try {
-              const response = await fetch(base + '/event', { headers, signal: resetSignal });
-              if (!response.ok || !response.body) throw new Error('Reset event stream unavailable');
-              resetEvents = sseEvents(response.body);
-              const connected = await resetEvents.next();
-              if (connected.done || connected.value.type !== 'server.connected') throw new Error('Reset event stream not ready');
-              await api('/instance/dispose', {}, resetSignal);
-              let disposed = false;
-              for await (const event of resetEvents) {
-                if (event.type === 'server.instance.disposed') { disposed = true; break; }
-              }
-              if (!disposed) throw new Error('Instance disposal was not confirmed');
-            } finally {
-              resetController.abort();
-              await resetEvents?.return().catch(() => {});
-            }
+            // Instance-scoped disposal may acknowledge before teardown. This
+            // process is exclusively ours; global disposal awaits all teardown.
+            await api('/global/dispose', {}, AbortSignal.timeout(5000));
             await rm(requestFile, { force: true });
             await rm(hookFile, { force: true });
             mcp.setTools({});
