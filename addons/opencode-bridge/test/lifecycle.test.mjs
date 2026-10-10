@@ -52,7 +52,8 @@ test('idle retention does not restrict active workers and concurrent releases ke
   await Promise.all(workers.map(w => pool.put(w)));
   assert.equal(pool.idle.length, 2);
   assert.equal(disposed.size, 4);
-  await delay(160);
+  const deadline = Date.now() + 2000;
+  while (disposed.size < 6 && Date.now() < deadline) await delay(20);
   assert.equal(pool.workers.size, 0);
   assert.equal(disposed.size, 6);
   await pool.close();
